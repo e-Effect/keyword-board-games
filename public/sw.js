@@ -1,9 +1,9 @@
-const CACHE_NAME = "hitblow-match-v23";
+const CACHE_NAME = "hitblow-match-v24";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
   "/styles.css",
-  "/styles.css?v=21",
+  "/styles.css?v=22",
   "/app.js",
   "/app.js?v=21",
   "/viewport.js",
@@ -11,9 +11,13 @@ const STATIC_ASSETS = [
   "/ghost-setup.js",
   "/ghost-setup.js?v=21",
   "/site.webmanifest",
-  "/site.webmanifest?v=21",
+  "/site.webmanifest?v=22",
   "/assets/ghost-sprites.png",
-  "/assets/mark.svg",
+  "/assets/ghost-game-32.png",
+  "/assets/ghost-game-180.png",
+  "/assets/ghost-game-192.png",
+  "/assets/ghost-game-512.png",
+  "/assets/ghost-game-maskable-512.png",
   "/assets/icon-192.png",
   "/assets/icon-512.png"
 ];

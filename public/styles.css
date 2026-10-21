@@ -15,11 +15,7 @@ h2 { font-size:1.3rem; }
 h3 { font-size:1rem; }
 .shell { width:min(100%,980px); margin:auto; padding:max(22px,env(safe-area-inset-top)) 24px max(24px,env(safe-area-inset-bottom)); }
 .topbar { display:grid; grid-template-columns:44px 1fr auto; align-items:center; gap:12px; margin-bottom:38px; }
-.brand-mark { display:grid; grid-template-columns:1fr 1fr; gap:3px; width:42px; height:42px; transform:rotate(-7deg); }
-.brand-mark i { background:var(--blue); border-radius:5px; }
-.brand-mark i:nth-child(2) { background:#ffca45; }
-.brand-mark i:nth-child(3) { background:#ff79b0; }
-.brand-mark i:nth-child(4) { background:#50d4c3; }
+.brand-mark { display:block; width:42px; height:42px; object-fit:contain; border-radius:8px; }
 .eyebrow { color:var(--blue); font-size:.65rem; font-weight:900; margin-bottom:3px; }
 .connection { font-size:.72rem; color:var(--muted); font-weight:800; white-space:nowrap; }
 .connection::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%; background:#f2bd46; }
