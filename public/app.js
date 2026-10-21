@@ -272,6 +272,32 @@ function ghostArt(kind = "unknown") {
   return `<span class="ghost-art ${kind}" aria-hidden="true"></span>`;
 }
 
+function ghostRulesButton() {
+  return `<button class="rules-button" type="button" data-ghost-rules><span aria-hidden="true">?</span>ルール</button>`;
+}
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-ghost-rules]")) return;
+  let dialog = document.querySelector("#ghostRules");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "ghostRules";
+    dialog.className = "ghost-rules";
+    dialog.setAttribute("aria-labelledby", "ghostRulesTitle");
+    dialog.innerHTML = `
+      <header><h2 id="ghostRulesTitle">ゴーストのルール</h2><button class="rules-close" type="button" aria-label="ルールを閉じる">×</button></header>
+      <section><h3>水色4体・ピンク4体</h3><p>自分のおばけ8体の位置を入れ替えて配置します。相手のおばけの色は、捕まえるまでわかりません。</p></section>
+      <section><h3>1ターンに1体、1マス</h3><p>交互に、おばけを上下左右のどれかへ1マス動かします。斜めには動けません。相手のおばけがいるマスへ動くと捕まえられます。</p></section>
+      <section><h3>勝ち方は3つ</h3><ul><li>相手の水色を4体すべて捕まえる。</li><li>自分のピンクを4体すべて相手に取らせる。</li><li>自分の水色を1体、相手側の左右どちらかの脱出口から盤外へ出す。</li></ul></section>
+      <section><h3>脱出は角に着いた次の自分のターン</h3><p>上側の左右の角が、あなたの脱出口につながっています。角に着いただけでは勝ちになりません。次の自分のターンにその水色を選び、盤外のドアを押すと脱出です。相手は下側の脱出口を目指します。</p></section>
+      <section><h3>ピンクの捕獲に注意</h3><p>相手のピンクを4体すべて捕まえるか、自分の水色を4体すべて取られると負けです。上の個数は、あなたが捕まえた相手のおばけの数です。</p></section>
+      <section><h3>制限時間</h3><p>設定した制限時間内に動かなければ、無回答として相手のターンになります。ルールを開いている間も時間は進みます。無制限の部屋では時間切れはありません。</p></section>`;
+    dialog.querySelector(".rules-close").addEventListener("click", () => dialog.close());
+    document.body.append(dialog);
+  }
+  if (!dialog.open) dialog.showModal();
+});
+
 function renderGamePicker() {
   app.innerHTML = `
     <section class="game-picker">
@@ -328,6 +354,7 @@ function renderJoin() {
     app.innerHTML = `
       <section class="panel stack">
         <h2>対戦する</h2>
+        ${selectedGame === "ghost" ? ghostRulesButton() : ""}
         <div class="room-choices">
           <button id="createRoom" class="button" type="button">部屋を作る</button>
           <button id="joinRoom" class="button secondary" type="button">入室する</button>
@@ -661,7 +688,18 @@ function renderGhostBoard() {
       `);
     }
   }
-  return `<div class="ghost-board">${rows.join("")}</div>`;
+  return renderGhostField(`<div class="ghost-board">${rows.join("")}</div>`);
+}
+
+function renderGhostField(board) {
+  const selected = state.ghost.pieces.find((piece) => piece.id === selectedGhostPieceId);
+  const ready = state.status === "playing" && state.isMyTurn && isGhostExitReady(selected);
+  const selectedCol = selected ? ghostToView(selected.row, selected.col).col : null;
+  const doors = (mine) => `<div class="ghost-exits ${mine ? "own-exits" : "opponent-exits"}">
+    ${[0, 5].map((col) => `<button type="button" class="ghost-door ${ready && mine && selectedCol === col ? "available" : ""}" data-ghost-escape="${col}" aria-label="${mine ? "あなた" : "相手"}の${col === 0 ? "左" : "右"}の脱出口" ${ready && mine && selectedCol === col ? "" : "disabled"}><span class="door-art" aria-hidden="true"><i></i></span><span class="door-arrow" aria-hidden="true">${mine ? "↑" : "↓"}</span></button>`).join("")}
+    <div class="exit-caption"><strong>${mine ? "あなたの脱出口" : "相手の脱出口"}</strong>${mine ? `<small>${ready ? "ドアを押して脱出" : "水色で盤外へ"}</small>` : ""}</div>
+  </div>`;
+  return `<div class="ghost-field">${doors(true)}${board}${doors(false)}</div>`;
 }
 
 function renderGhostSetupBoard() {
@@ -679,7 +717,7 @@ function renderGhostSetupBoard() {
       `);
     }
   }
-  return `<div class="ghost-board setup-board">${cells.join("")}</div>`;
+  return renderGhostField(`<div class="ghost-board setup-board">${cells.join("")}</div>`);
 }
 
 function getGhostSetupSlot(cell) {
@@ -888,7 +926,7 @@ function renderGhostSetup() {
           <p>GHOST DUEL</p>
           <h2>配置を決める</h2>
         </div>
-        <span>${timeLabel(state.rules.timeLimitSeconds)}</span>
+        <div class="ghost-header-tools">${ghostRulesButton()}<span>${timeLabel(state.rules.timeLimitSeconds)}</span></div>
       </header>
       ${renderMatchStats()}
       <div class="ghost-players">
@@ -918,12 +956,11 @@ function renderGhostSetup() {
 }
 
 function renderGhostCounts() {
-  const me = state.ghost.counts.me;
   const opponent = state.ghost.counts.opponent || { goodCaptured: 0, badCaptured: 0 };
   return `
     <div class="ghost-captures">
-      <span>${ghostArt("good")}取った水色 <b>${opponent.goodCaptured}/4</b></span>
-      <span>${ghostArt("bad")}取られたピンク <b>${me.badCaptured}/4</b></span>
+      <span>${ghostArt("good")}捕まえた水色 <b>${opponent.goodCaptured}/4</b></span>
+      <span>${ghostArt("bad")}捕まえたピンク <b>${opponent.badCaptured}/4</b></span>
     </div>
   `;
 }
@@ -973,7 +1010,7 @@ function renderGhostGame() {
           <p>GHOST DUEL</p>
           <h2>${ended ? "対戦結果" : state.isMyTurn ? "あなたのターン" : "相手のターン"}</h2>
         </div>
-        ${ended ? "" : `<span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}
+        <div class="ghost-header-tools">${ghostRulesButton()}${ended ? "" : `<span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}</div>
       </header>
       ${ended ? `<section class="result-banner ghost-result ${won ? "win" : "lose"}" aria-label="対戦結果">
         <h2>${won ? "WIN" : "Lose"}</h2><p>${ghostWinText(state.ghost.winReason, won)}</p>
@@ -981,9 +1018,6 @@ function renderGhostGame() {
       ${renderGhostCounts()}
       ${ended ? "" : renderGhostFeedback()}
       ${renderGhostBoard()}
-      ${!ended ? `<div class="ghost-panel">
-        ${selected && isGhostExitReady(selected) && state.isMyTurn ? `<button id="ghostEscape" class="button">水色のおばけを脱出させる</button>` : ""}
-      </div>` : ""}
       ${ended ? `
         <div class="ghost-actions">
           <button id="rematch" class="button" type="button" ${state.me.rematch || !state.opponent ? "disabled" : ""}>${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
@@ -1010,13 +1044,12 @@ function renderGhostGame() {
         }
       });
     });
-    const escapeButton = document.querySelector("#ghostEscape");
-    if (escapeButton && selected) {
+    document.querySelectorAll("[data-ghost-escape]:not(:disabled)").forEach((escapeButton) => {
       escapeButton.addEventListener("click", () => {
         send({ type: "ghost-move", pieceId: selected.id, escape: true });
         selectedGhostPieceId = null;
       });
-    }
+    });
   }
   if (ended) {
     document.querySelector("#rematch").addEventListener("click", () => send({ type: "rematch" }));
