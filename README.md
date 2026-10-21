@@ -17,6 +17,15 @@ PC では `http://localhost:3000` を開きます。
 
 ### 常設公開 (Render)
 
+公開URL: https://keyword-board-games.onrender.com/
+
+管理画面: https://dashboard.render.com/web/srv-dbc7oghsrm7s73fu744g
+
+ソース: https://github.com/e-Effect/keyword-board-games
+
+公開Gitリポジトリーから作成したサービスです。更新時はGitHubへpushした後、
+Render管理画面のManual Deployから最新コミットをデプロイします。
+
 `render.yaml` に無料Webサービスの設定があります。
 ビルドは `npm ci && npm test`、起動は `npm start`、ヘルスチェックは `/health` です。
 HTTPとWebSocketは同じホストを使います。PC側のサーバーやトンネルは不要です。
@@ -24,6 +33,12 @@ HTTPとWebSocketは同じホストを使います。PC側のサーバーやト�
 無料プランは15分間通信がないと休止し、次のアクセスで自動起動します。
 初回表示には約1分かかる場合があります。
 対戦データはメモリー上にあるため、サービス再起動時には失われます。
+
+公開先の疎通・対戦確認:
+
+```powershell
+node scripts/verify-hosted.cjs https://keyword-board-games.onrender.com
+```
 
 ### ローカルの一時公開
 
