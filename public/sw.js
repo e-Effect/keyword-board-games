@@ -1,4 +1,4 @@
-const CACHE_NAME = "hitblow-match-v22";
+const CACHE_NAME = "hitblow-match-v23";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
@@ -38,7 +38,7 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  if (request.method !== "GET" || url.origin !== location.origin || url.pathname === "/health") {
+  if (request.method !== "GET" || url.origin !== location.origin || url.pathname === "/health" || url.pathname === "/commentator" || url.pathname.startsWith("/commentator/")) {
     return;
   }
 

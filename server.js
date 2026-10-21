@@ -4,6 +4,7 @@ const http = require("http");
 const path = require("path");
 const { URL } = require("url");
 const { WebSocketServer } = require("ws");
+const { createCommentatorApi } = require("./src/commentator");
 const {
   DEFAULT_TURN_TIME_LIMIT,
   DEFAULT_LENGTH,
@@ -40,6 +41,7 @@ function hashKeyword(keyword) {
 function makeRoom(roomKey, keywordHash, gameType, timeLimitSeconds = DEFAULT_TURN_TIME_LIMIT) {
   return {
     roomKey,
+    commentatorId: crypto.randomUUID(),
     keywordHash,
     gameType,
     players: [],
@@ -857,15 +859,19 @@ function handleSocketMessage(socket, session, raw) {
   }
 }
 
-function serveStatic(request, response) {
+const commentatorApi = createCommentatorApi({ password: process.env.COMMENTATOR_PASSWORD, sessionSecret: process.env.COMMENTATOR_SESSION_SECRET, rooms, startSlotsForIndex });
+
+async function serveStatic(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  if (await commentatorApi(request, response, requestUrl)) return;
   if (requestUrl.pathname === "/health") {
     response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({ ok: true, rooms: rooms.size }));
     return;
   }
 
-  const pathname = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
+  const pathname = requestUrl.pathname === "/" ? "/index.html"
+    : ["/commentator", "/commentator/"].includes(requestUrl.pathname) ? "/commentator/index.html" : requestUrl.pathname;
   const safePath = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.[/\\])+/, "");
   const filePath = path.join(PUBLIC_DIR, safePath);
 
@@ -881,18 +887,30 @@ function serveStatic(request, response) {
       response.end("Not found");
       return;
     }
-    const cacheControl = pathname === "/index.html" || pathname === "/sw.js"
+    const cacheControl = pathname.startsWith("/commentator/") ? "no-store, private" : pathname === "/index.html" || pathname === "/sw.js"
       ? "no-cache"
       : "public, max-age=60";
     response.writeHead(200, {
       "cache-control": cacheControl,
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      ...(pathname.startsWith("/commentator/") ? {
+        "x-frame-options": "DENY",
+        "x-robots-tag": "noindex, nofollow",
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+      } : {}),
       "content-type": mimeTypes[path.extname(filePath)] || "application/octet-stream"
     });
     response.end(data);
   });
 }
 
-const server = http.createServer(serveStatic);
+const server = http.createServer((request, response) => {
+  serveStatic(request, response).catch(() => {
+    if (!response.headersSent) response.writeHead(500, { "cache-control": "no-store" });
+    response.end();
+  });
+});
 const webSocketServer = new WebSocketServer({ server, maxPayload: 4096 });
 
 webSocketServer.on("connection", (socket) => {
