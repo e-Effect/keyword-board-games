@@ -1,0 +1,19 @@
+{
+  "name": "keyword-hit-and-blow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keyword-matched online Hit and Blow game for mobile browsers.",
+  "main": "server.js",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "tunnel": "npx --yes cloudflared tunnel --url http://localhost:3000 --no-autoupdate"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {}
+}

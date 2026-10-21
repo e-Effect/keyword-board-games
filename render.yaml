@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: keyword-board-games
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm test
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
