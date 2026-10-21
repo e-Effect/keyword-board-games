@@ -21,6 +21,8 @@ let guessDigits = [];
 let ghostSetupKinds = [...DEFAULT_GHOST_SETUP];
 let selectedGhostPieceId = null;
 let ghostSetupDrag = null;
+let ghostSwapMotion = null;
+let ghostKeyboardSlot = null;
 let ghostFeedback = null;
 let ghostFeedbackTimer = null;
 let lastToastTimer = null;
@@ -672,7 +674,7 @@ function renderGhostSetupBoard() {
       const kind = slotIndex === undefined ? null : ghostSetupKinds[slotIndex];
       cells.push(`
         <div class="ghost-cell setup ${kind ? "filled" : ""}" data-slot-index="${slotIndex === undefined ? "" : slotIndex}">
-          ${kind ? `<button class="ghost-piece me ${kind}" type="button" aria-label="${ghostKindLabel(kind)}のおばけ">${ghostArt(kind)}</button>` : ""}
+          ${kind ? `<button class="ghost-piece me ${kind}" type="button" aria-label="${ghostKindLabel(kind)}のおばけ" aria-pressed="false">${ghostArt(kind)}</button>` : ""}
         </div>
       `);
     }
@@ -689,7 +691,7 @@ function getGhostSetupSlot(cell) {
     return null;
   }
   const slotIndex = Number(slotValue);
-  if (!Number.isInteger(slotIndex) || slotIndex < 0) {
+  if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= 8) {
     return null;
   }
   return slotIndex;
@@ -719,9 +721,43 @@ function markGhostSetupDragTarget(cell) {
 }
 
 function swapGhostSetupSlots(fromIndex, toIndex) {
-  const next = [...ghostSetupKinds];
-  [next[fromIndex], next[toIndex]] = [next[toIndex], next[fromIndex]];
-  ghostSetupKinds = next;
+  ghostSetupKinds = swapGhostSetupPieces(ghostSetupKinds, fromIndex, toIndex);
+}
+
+function animateGhostSetupSwap(fromIndex, toIndex, draggedRect) {
+  const from = document.querySelector(`[data-slot-index="${fromIndex}"] .ghost-piece`);
+  const to = document.querySelector(`[data-slot-index="${toIndex}"] .ghost-piece`);
+  const fromRect = from.getBoundingClientRect();
+  const toRect = to.getBoundingClientRect();
+  swapGhostSetupSlots(fromIndex, toIndex);
+  renderGhostSetup();
+  const board = document.querySelector(".setup-board");
+  const source = board.querySelector(`[data-slot-index="${fromIndex}"] .ghost-piece`);
+  const target = board.querySelector(`[data-slot-index="${toIndex}"] .ghost-piece`);
+  for (const piece of [source, target]) piece.parentElement.classList.add("swapped");
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  // The two pieces start at their previous positions, then travel into their new slots.
+  const motion = { board, animations: [] };
+  ghostSwapMotion = motion;
+  board.classList.add("swap-animating");
+  const floating = draggedRect || fromRect;
+  const moves = [
+    [source, toRect.left - fromRect.left, toRect.top - fromRect.top],
+    [target, floating.left - toRect.left, floating.top - toRect.top]
+  ];
+  for (const [piece, x, y] of moves) {
+    piece.parentElement.classList.add("swap-moving");
+    motion.animations.push(piece.animate([
+      { transform: `translate(${x}px, ${y}px)`, opacity: 1 },
+      { transform: "translate(0, 0)", opacity: 1 }
+    ], { duration: 320, easing: "cubic-bezier(.2,.8,.2,1)" }));
+  }
+  Promise.allSettled(motion.animations.map((animation) => animation.finished)).then(() => {
+    board.classList.remove("swap-animating");
+    board.querySelectorAll(".swap-moving").forEach((cell) => cell.classList.remove("swap-moving"));
+    if (ghostSwapMotion === motion) ghostSwapMotion = null;
+  });
 }
 
 function bindGhostSetupDrag() {
@@ -732,16 +768,24 @@ function bindGhostSetupDrag() {
     }
 
     cell.addEventListener("pointerdown", (event) => {
-      if (!event.isPrimary || event.button !== 0 || ghostSetupDrag) return;
+      if (!event.isPrimary || event.button !== 0 || ghostSetupDrag || ghostSwapMotion) return;
       clearGhostSetupDragClasses();
+      ghostKeyboardSlot = null;
+      document.querySelectorAll(".swap-selected").forEach((selected) => {
+        selected.classList.remove("swap-selected");
+        selected.querySelector("button").setAttribute("aria-pressed", "false");
+      });
+      const rect = cell.querySelector(".ghost-piece").getBoundingClientRect();
       ghostSetupDrag = {
         pointerId: event.pointerId,
         fromIndex: slotIndex,
         startX: event.clientX,
         startY: event.clientY,
-        moved: false
+        moved: false,
+        rect,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top
       };
-      cell.classList.add("dragging");
       if (cell.setPointerCapture) {
         cell.setPointerCapture(event.pointerId);
       }
@@ -757,16 +801,19 @@ function bindGhostSetupDrag() {
       }
       if (ghostSetupDrag.moved) {
         event.preventDefault();
+        cell.classList.add("dragging");
         let preview = document.querySelector(".ghost-drag-preview");
         if (!preview) {
           preview = cell.querySelector(".ghost-piece").cloneNode(true);
           preview.classList.add("ghost-drag-preview");
           preview.setAttribute("aria-hidden", "true");
           preview.tabIndex = -1;
+          preview.style.width = `${ghostSetupDrag.rect.width}px`;
+          preview.style.height = `${ghostSetupDrag.rect.height}px`;
           document.body.append(preview);
         }
-        preview.style.left = `${event.clientX - 25}px`;
-        preview.style.top = `${event.clientY - 25}px`;
+        preview.style.left = `${event.clientX - ghostSetupDrag.offsetX}px`;
+        preview.style.top = `${event.clientY - ghostSetupDrag.offsetY}px`;
         markGhostSetupDragTarget(getGhostSetupCellAt(event.clientX, event.clientY));
       }
     });
@@ -778,22 +825,13 @@ function bindGhostSetupDrag() {
       const drag = ghostSetupDrag;
       ghostSetupDrag = null;
       const targetIndex = getGhostSetupSlot(getGhostSetupCellAt(event.clientX, event.clientY));
+      const draggedRect = document.querySelector(".ghost-drag-preview")?.getBoundingClientRect();
       clearGhostSetupDragClasses();
       if (cell.releasePointerCapture) {
         cell.releasePointerCapture(event.pointerId);
       }
       if (drag.moved && targetIndex !== null && targetIndex !== drag.fromIndex) {
-        swapGhostSetupSlots(drag.fromIndex, targetIndex);
-        renderGhostSetup();
-        for (const index of [drag.fromIndex, targetIndex]) {
-          document.querySelector(`[data-slot-index="${index}"]`).classList.add("swapped");
-        }
-        showToast("コマを入れ替えました");
-        return;
-      }
-      if (!drag.moved) {
-        ghostSetupKinds[drag.fromIndex] = ghostSetupKinds[drag.fromIndex] === "good" ? "bad" : "good";
-        renderGhostSetup();
+        animateGhostSetupSwap(drag.fromIndex, targetIndex, draggedRect);
       }
     });
 
@@ -812,14 +850,31 @@ function bindGhostSetupDrag() {
     cell.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        ghostSetupKinds[slotIndex] = ghostSetupKinds[slotIndex] === "good" ? "bad" : "good";
-        renderGhostSetup();
+        if (ghostSwapMotion || ghostSetupDrag) return;
+        if (ghostKeyboardSlot === null) {
+          ghostKeyboardSlot = slotIndex;
+          cell.classList.add("swap-selected");
+          cell.querySelector("button").setAttribute("aria-pressed", "true");
+        } else {
+          const fromIndex = ghostKeyboardSlot;
+          ghostKeyboardSlot = null;
+          if (fromIndex !== slotIndex) animateGhostSetupSwap(fromIndex, slotIndex);
+          else {
+            cell.classList.remove("swap-selected");
+            cell.querySelector("button").setAttribute("aria-pressed", "false");
+          }
+        }
       }
     });
   });
 }
 
 function renderGhostSetup() {
+  if (ghostSwapMotion) {
+    ghostSwapMotion.animations.forEach((animation) => animation.cancel());
+    ghostSwapMotion = null;
+  }
+  ghostKeyboardSlot = null;
   ghostSetupDrag = null;
   clearGhostSetupDragClasses();
   setScreenMode("ghost");
