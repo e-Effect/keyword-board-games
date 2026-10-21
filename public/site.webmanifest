@@ -1,14 +1,14 @@
 {
-  "name": "Hit & Blow Match",
-  "short_name": "HitBlow",
-  "description": "Keyword-matched online Hit and Blow game.",
+  "name": "ふたりのゲーム",
+  "short_name": "ふたりゲーム",
+  "description": "ヒット＆ブローとゴーストのオンライン対戦。",
   "start_url": "/",
   "scope": "/",
   "id": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#101419",
-  "theme_color": "#101419",
+  "background_color": "#f5faff",
+  "theme_color": "#f5faff",
   "icons": [
     {
       "src": "/assets/mark.svg",

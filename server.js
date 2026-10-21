@@ -140,17 +140,17 @@ function startSlotsForIndex(index) {
 
 function validateGhostSetup(kinds) {
   if (!Array.isArray(kinds) || kinds.length !== 8) {
-    return { ok: false, message: "青4体、赤4体を配置してください。" };
+    return { ok: false, message: "水色4体、ピンク4体を配置してください。" };
   }
   const normalized = kinds.map((kind) => String(kind));
   if (normalized.some((kind) => kind !== "good" && kind !== "bad")) {
-    return { ok: false, message: "青か赤を選んでください。" };
+    return { ok: false, message: "水色かピンクを選んでください。" };
   }
   if (normalized.filter((kind) => kind === "good").length !== 4) {
-    return { ok: false, message: "青は4体にしてください。" };
+    return { ok: false, message: "水色は4体にしてください。" };
   }
   if (normalized.filter((kind) => kind === "bad").length !== 4) {
-    return { ok: false, message: "赤は4体にしてください。" };
+    return { ok: false, message: "ピンクは4体にしてください。" };
   }
   return { ok: true, value: normalized };
 }

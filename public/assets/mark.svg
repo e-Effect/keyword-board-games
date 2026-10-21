@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Hit and Blow">
-  <rect width="128" height="128" rx="18" fill="#101419"/>
-  <path d="M24 36h80v56H24z" fill="#202832" stroke="#34404d" stroke-width="4"/>
-  <circle cx="42" cy="54" r="10" fill="#35c4a1"/>
-  <circle cx="64" cy="54" r="10" fill="#f2b84b"/>
-  <circle cx="86" cy="54" r="10" fill="#35c4a1"/>
-  <path d="M38 82h52" stroke="#f4f7f8" stroke-width="8" stroke-linecap="round"/>
-  <path d="M30 22l16 14M98 22 82 36" stroke="#35c4a1" stroke-width="8" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Play Together">
+  <rect width="128" height="128" rx="22" fill="#f5faff"/>
+  <g transform="rotate(-7 64 64)">
+    <rect x="22" y="22" width="39" height="39" rx="8" fill="#2865e8"/>
+    <rect x="67" y="22" width="39" height="39" rx="8" fill="#ffca45"/>
+    <rect x="22" y="67" width="39" height="39" rx="8" fill="#ff79b0"/>
+    <rect x="67" y="67" width="39" height="39" rx="8" fill="#50d4c3"/>
+  </g>
 </svg>

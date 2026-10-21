@@ -26,6 +26,7 @@ let ghostFeedbackTimer = null;
 let lastToastTimer = null;
 let reconnectTimer = null;
 let joinMode = null;
+let selectedGame = null;
 let joining = false;
 
 function timeLabel(seconds) {
@@ -227,6 +228,7 @@ function connect() {
     if (message.type === "left") {
       state = null;
       joinMode = null;
+      selectedGame = null;
       joining = false;
       joinDraft.keyword = "";
       secretDigits = [];
@@ -239,6 +241,10 @@ function connect() {
 
   socket.addEventListener("close", () => {
     setConnection("offline");
+    if (!state && joining) {
+      joining = false;
+      render();
+    }
     reconnectTimer = setTimeout(connect, 1400);
   });
 
@@ -260,23 +266,38 @@ function sendJoin() {
   });
 }
 
-function renderGameOptions() {
-  return `
-    <fieldset class="time-field">
-      <legend>ゲーム</legend>
-      <div class="game-options">
-        ${[
-          ["hitblow", "Hit & Blow"],
-          ["ghost", "Ghost Duel"]
-        ].map(([value, label]) => `
-          <label class="game-option ${joinDraft.gameType === value ? "selected" : ""}">
-            <input type="radio" name="gameType" value="${value}" ${joinDraft.gameType === value ? "checked" : ""}>
-            <span>${label}</span>
-          </label>
-        `).join("")}
+function ghostArt(kind = "unknown") {
+  return `<span class="ghost-art ${kind}" aria-hidden="true"></span>`;
+}
+
+function renderGamePicker() {
+  app.innerHTML = `
+    <section class="game-picker">
+      <h2>ゲームを選ぶ</h2>
+      <div class="game-library">
+        <button id="chooseHitblow" class="game-cover numbers-cover" type="button">
+          <span class="number-art" aria-hidden="true"><i>1</i><i>2</i><i>3</i></span>
+          <span class="game-cover-label"><small>HIT &amp; BLOW</small><strong>ヒット＆ブロー</strong><span class="cover-arrow" aria-hidden="true">→</span></span>
+        </button>
+        <button id="chooseGhost" class="game-cover ghosts-cover" type="button">
+          <span class="ghost-pair" aria-hidden="true">${ghostArt("good")}${ghostArt("bad")}</span>
+          <span class="game-cover-label"><small>GHOST DUEL</small><strong>ゴースト</strong><span class="cover-arrow" aria-hidden="true">→</span></span>
+        </button>
       </div>
-    </fieldset>
-  `;
+    </section>`;
+  for (const [id, game] of [["chooseHitblow", "hitblow"], ["chooseGhost", "ghost"]]) {
+    document.querySelector(`#${id}`).addEventListener("click", () => {
+      selectedGame = game;
+      joinDraft.gameType = game;
+      render();
+    });
+  }
+}
+
+function backToGames() {
+  selectedGame = null;
+  joinMode = null;
+  render();
 }
 
 function renderTimeOptions() {
@@ -297,17 +318,23 @@ function renderTimeOptions() {
 
 function renderJoin() {
   setScreenMode("menu");
+  if (!selectedGame) {
+    renderGamePicker();
+    return;
+  }
   if (!joinMode) {
     app.innerHTML = `
       <section class="panel stack">
-        <h2>オンライン対戦</h2>
+        <h2>対戦する</h2>
         <div class="room-choices">
           <button id="createRoom" class="button" type="button">部屋を作る</button>
           <button id="joinRoom" class="button secondary" type="button">入室する</button>
         </div>
+        <button id="backGames" class="text-back" type="button">← ゲーム選択に戻る</button>
       </section>`;
     document.querySelector("#createRoom").addEventListener("click", () => { joinMode = "create"; render(); });
     document.querySelector("#joinRoom").addEventListener("click", () => { joinMode = "join"; render(); });
+    document.querySelector("#backGames").addEventListener("click", backToGames);
     return;
   }
   app.innerHTML = `
@@ -325,7 +352,7 @@ function renderJoin() {
           キーワード
           <input id="keyword" name="keyword" minlength="4" maxlength="40" autocomplete="off" value="${escapeHtml(joinDraft.keyword)}" placeholder="4文字以上">
         </label>
-        ${renderGameOptions()}
+        <input type="hidden" name="gameType" value="${joinDraft.gameType}">
         ${joinMode === "create" && joinDraft.gameType === "hitblow" ? `
           <fieldset class="time-field">
             <legend>桁数</legend>
@@ -337,21 +364,17 @@ function renderJoin() {
           </fieldset>` : ""}
         ${joinMode === "create" ? renderTimeOptions() : ""}
         <button class="button" type="submit" ${joining ? "disabled" : ""}>${joining ? "接続中…" : joinMode === "create" ? "部屋を作る" : "入室する"}</button>
-        <button id="backMain" class="button secondary" type="button">メインに戻る</button>
+        <button id="backMain" class="button secondary" type="button" ${joining ? "disabled" : ""}>部屋の選択に戻る</button>
+        <button id="backGames" class="text-back" type="button" ${joining ? "disabled" : ""}>← ゲーム選択に戻る</button>
       </form>
     </section>
   `;
 
   document.querySelector("#backMain").addEventListener("click", () => { joinMode = null; render(); });
+  document.querySelector("#backGames").addEventListener("click", backToGames);
   for (const name of ["nickname", "keyword"]) {
     document.querySelector(`#${name}`).addEventListener("input", (event) => { joinDraft[name] = event.target.value; });
   }
-  document.querySelectorAll('input[name="gameType"]').forEach((input) => {
-    input.addEventListener("change", () => {
-      joinDraft.gameType = input.value;
-      render();
-    });
-  });
   document.querySelectorAll('input[name="length"]').forEach((input) => {
     input.addEventListener("change", () => { joinDraft.length = Number(input.value); render(); });
   });
@@ -419,6 +442,8 @@ function renderPlayers() {
 
 function setScreenMode(mode) {
   document.body.dataset.screen = mode;
+  document.body.dataset.game = state ? state.gameType : selectedGame || "home";
+  document.querySelector(".topbar h1").textContent = !state && !selectedGame ? "ふたりのゲーム" : (state ? state.gameType : selectedGame) === "ghost" ? "ゴースト" : "ヒット＆ブロー";
 }
 
 function splitDigits(value) {
@@ -437,11 +462,7 @@ function playerConnectionText(player) {
 }
 
 function renderAvatar() {
-  return `
-    <div class="duel-avatar" aria-hidden="true">
-      <span></span>
-    </div>
-  `;
+  return `<div class="duel-avatar" aria-hidden="true">☺</div>`;
 }
 
 function renderDuelCard(value, concealed = false) {
@@ -573,23 +594,23 @@ function ghostPieceAt(row, col) {
 
 function ghostKindLabel(kind) {
   if (kind === "good") {
-    return "青";
+    return "水色";
   }
   if (kind === "bad") {
-    return "赤";
+    return "ピンク";
   }
   return "?";
 }
 
 function ghostWinText(reason, won) {
   if (reason === "escape") {
-    return won ? "青を脱出させました" : "相手の青が脱出しました";
+    return won ? "水色のおばけが脱出！" : "相手の水色のおばけが脱出しました";
   }
   if (reason === "capture-good") {
-    return won ? "相手の青をすべて捕獲！" : "青をすべて取られました";
+    return won ? "相手の水色をすべて捕獲！" : "水色をすべて取られました";
   }
   if (reason === "own-bad-captured") {
-    return won ? "赤をすべて取らせました" : "相手の赤をすべて取ってしまいました";
+    return won ? "ピンクをすべて取らせました" : "相手のピンクをすべて取ってしまいました";
   }
   return "勝負が決まりました";
 }
@@ -613,10 +634,10 @@ function isAdjacentToSelected(row, col) {
 }
 
 function renderGhostPiece(piece) {
-  const label = piece.owner === "me" ? ghostKindLabel(piece.kind) : "?";
+  const label = piece.owner === "me" ? `${ghostKindLabel(piece.kind)}のおばけ` : "相手のおばけ";
   return `
     <button class="ghost-piece ${piece.owner} ${piece.kind}" type="button" data-piece-id="${piece.id}" aria-label="${label}">
-      ${label}
+      ${ghostArt(piece.kind)}
     </button>
   `;
 }
@@ -651,7 +672,7 @@ function renderGhostSetupBoard() {
       const kind = slotIndex === undefined ? null : ghostSetupKinds[slotIndex];
       cells.push(`
         <div class="ghost-cell setup ${kind ? "filled" : ""}" data-slot-index="${slotIndex === undefined ? "" : slotIndex}">
-          ${kind ? `<button class="ghost-piece me ${kind}" type="button">${ghostKindLabel(kind)}</button>` : ""}
+          ${kind ? `<button class="ghost-piece me ${kind}" type="button" aria-label="${ghostKindLabel(kind)}のおばけ">${ghostArt(kind)}</button>` : ""}
         </div>
       `);
     }
@@ -809,7 +830,7 @@ function renderGhostSetup() {
     <section class="ghost-screen">
       <header class="ghost-header">
         <div>
-          <p>Ghost Duel</p>
+          <p>GHOST DUEL</p>
           <h2>配置を決める</h2>
         </div>
         <span>${timeLabel(state.rules.timeLimitSeconds)}</span>
@@ -819,15 +840,15 @@ function renderGhostSetup() {
         <span>${escapeHtml(state.me.nickname)} / ${playerStatus(state.me, "")}</span>
         <span>${escapeHtml(state.opponent ? state.opponent.nickname : "相手")} / ${playerStatus(state.opponent, "待機中")}</span>
       </div>
-      <div class="ghost-help">${alreadyReady ? "相手の配置を待っています。" : "青4体・赤4体。相手には色が見えません。"}</div>
+      <div class="ghost-help">${alreadyReady ? "相手の配置を待っています" : "水色4体・ピンク4体"}</div>
       ${renderGhostSetupBoard()}
       <div class="ghost-counts">
-        <span class="good">青 ${goodCount}/4</span>
-        <span class="bad">赤 ${badCount}/4</span>
+        <span class="good">${ghostArt("good")}水色 ${goodCount}/4</span>
+        <span class="bad">${ghostArt("bad")}ピンク ${badCount}/4</span>
       </div>
       <div class="ghost-actions">
         <button id="submitGhostSetup" class="button" type="button" ${!alreadyReady && goodCount === 4 && badCount === 4 ? "" : "disabled"}>${alreadyReady ? "配置済み" : "配置完了"}</button>
-        <button id="leave" class="button secondary" type="button">戻る</button>
+        <button id="leave" class="button secondary" type="button">ゲーム選択へ</button>
       </div>
     </section>
   `;
@@ -846,8 +867,8 @@ function renderGhostCounts() {
   const opponent = state.ghost.counts.opponent || { goodCaptured: 0, badCaptured: 0 };
   return `
     <div class="ghost-captures">
-      <span>取った青 ${opponent.goodCaptured}/4</span>
-      <span>取られた赤 ${me.badCaptured}/4</span>
+      <span>${ghostArt("good")}取った水色 <b>${opponent.goodCaptured}/4</b></span>
+      <span>${ghostArt("bad")}取られたピンク <b>${me.badCaptured}/4</b></span>
     </div>
   `;
 }
@@ -866,7 +887,7 @@ function updateGhostFeedback(message) {
   ghostFeedback = {
     kind: blue ? "good" : "bad",
     tone: mine === blue ? "success" : "danger",
-    text: blue ? mine ? "青を捕獲！" : "青を取られた！" : mine ? "しまった、赤だ！" : "赤を取らせた！"
+    text: blue ? mine ? "水色を捕獲！" : "水色を取られた！" : mine ? "しまった、ピンクだ！" : "ピンクを取らせた！"
   };
   clearTimeout(ghostFeedbackTimer);
   ghostFeedbackTimer = setTimeout(() => {
@@ -881,7 +902,7 @@ function updateGhostFeedback(message) {
 
 function renderGhostFeedback() {
   return `<div class="ghost-feedback ${ghostFeedback ? ghostFeedback.tone : ""}" role="status" aria-live="polite">
-    ${ghostFeedback ? `<span class="feedback-piece ${ghostFeedback.kind}" aria-hidden="true">${ghostKindLabel(ghostFeedback.kind)}</span><strong>${ghostFeedback.text}</strong>` : ""}
+    ${ghostFeedback ? `<span class="feedback-piece" aria-hidden="true">${ghostArt(ghostFeedback.kind)}</span><strong>${ghostFeedback.text}</strong>` : ""}
   </div>`;
 }
 
@@ -894,7 +915,7 @@ function renderGhostGame() {
     <section class="ghost-screen play">
       <header class="ghost-header ${ended ? "finished" : state.isMyTurn ? "my-turn" : "their-turn"}">
         <div>
-          <p>Ghost Duel</p>
+          <p>GHOST DUEL</p>
           <h2>${ended ? "対戦結果" : state.isMyTurn ? "あなたのターン" : "相手のターン"}</h2>
         </div>
         ${ended ? "" : `<span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}
@@ -906,7 +927,7 @@ function renderGhostGame() {
       ${ended ? "" : renderGhostFeedback()}
       ${renderGhostBoard()}
       ${!ended ? `<div class="ghost-panel">
-        ${selected && isGhostExitReady(selected) && state.isMyTurn ? `<button id="ghostEscape" class="button">青を脱出させる</button>` : ""}
+        ${selected && isGhostExitReady(selected) && state.isMyTurn ? `<button id="ghostEscape" class="button">水色のおばけを脱出させる</button>` : ""}
       </div>` : ""}
       ${ended ? `
         <div class="ghost-actions">
@@ -961,7 +982,7 @@ function renderWaiting() {
       ${renderPlayers()}
       <div class="actions">
         <button id="copyLink" class="button" type="button">URLコピー</button>
-        <button id="leave" class="button secondary" type="button">戻る</button>
+        <button id="leave" class="button secondary" type="button">ゲーム選択へ</button>
       </div>
     </section>
   `;
@@ -1026,7 +1047,7 @@ function renderSetup() {
         prompt: state.me.ready ? "相手の入力を待っています" : "あなたの数字を決めてください",
         active: !state.me.ready
       })}
-      <button id="leave" class="arena-leave" type="button">戻る</button>
+      <button id="leave" class="arena-leave" type="button">ゲーム選択へ</button>
     </section>
   `;
 
