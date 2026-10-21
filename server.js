@@ -209,7 +209,8 @@ function publicGhostState(room, player) {
       me: countsFor(player.id),
       opponent: opponent ? countsFor(opponent.id) : null
     },
-    log: room.ghost.log.slice(-8).map((entry) => ({
+    log: room.ghost.log.slice(-8).map((entry, index) => ({
+      eventId: Math.max(0, room.ghost.log.length - 8) + index + 1,
       side: entry.playerId === player.id ? "me" : "opponent",
       action: entry.action,
       pieceKind: entry.playerId === player.id ? entry.pieceKind : "unknown",

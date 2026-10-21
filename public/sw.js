@@ -1,13 +1,13 @@
-const CACHE_NAME = "hitblow-match-v14";
+const CACHE_NAME = "hitblow-match-v16";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
   "/styles.css",
-  "/styles.css?v=13",
+  "/styles.css?v=15",
   "/app.js",
-  "/app.js?v=13",
+  "/app.js?v=15",
   "/site.webmanifest",
-  "/site.webmanifest?v=13",
+  "/site.webmanifest?v=15",
   "/assets/mark.svg",
   "/assets/icon-192.png",
   "/assets/icon-512.png"

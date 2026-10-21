@@ -21,6 +21,8 @@ let guessDigits = [];
 let ghostSetupKinds = [...DEFAULT_GHOST_SETUP];
 let selectedGhostPieceId = null;
 let ghostSetupDrag = null;
+let ghostFeedback = null;
+let ghostFeedbackTimer = null;
 let lastToastTimer = null;
 let reconnectTimer = null;
 let joinMode = null;
@@ -197,6 +199,7 @@ function connect() {
     const message = JSON.parse(event.data);
     if (message.type === "state") {
       joining = false;
+      updateGhostFeedback(message);
       if (message.status === "setup" && (!state || state.status !== "setup")) {
         secretDigits = [];
         guessDigits = [];
@@ -578,15 +581,15 @@ function ghostKindLabel(kind) {
   return "?";
 }
 
-function ghostWinText(reason) {
+function ghostWinText(reason, won) {
   if (reason === "escape") {
-    return "青が脱出しました";
+    return won ? "青を脱出させました" : "相手の青が脱出しました";
   }
   if (reason === "capture-good") {
-    return "相手の青をすべて取りました";
+    return won ? "相手の青をすべて捕獲！" : "青をすべて取られました";
   }
   if (reason === "own-bad-captured") {
-    return "自分の赤をすべて取らせました";
+    return won ? "赤をすべて取らせました" : "相手の赤をすべて取ってしまいました";
   }
   return "勝負が決まりました";
 }
@@ -677,6 +680,7 @@ function getGhostSetupCellAt(clientX, clientY) {
 }
 
 function clearGhostSetupDragClasses() {
+  document.querySelector(".ghost-drag-preview")?.remove();
   document.querySelectorAll(".ghost-cell.dragging, .ghost-cell.drag-over").forEach((cell) => {
     cell.classList.remove("dragging", "drag-over");
   });
@@ -688,7 +692,7 @@ function markGhostSetupDragTarget(cell) {
       candidate.classList.remove("drag-over");
     }
   });
-  if (cell && getGhostSetupSlot(cell) !== null) {
+  if (cell && getGhostSetupSlot(cell) !== null && getGhostSetupSlot(cell) !== ghostSetupDrag?.fromIndex) {
     cell.classList.add("drag-over");
   }
 }
@@ -707,6 +711,8 @@ function bindGhostSetupDrag() {
     }
 
     cell.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || event.button !== 0 || ghostSetupDrag) return;
+      clearGhostSetupDragClasses();
       ghostSetupDrag = {
         pointerId: event.pointerId,
         fromIndex: slotIndex,
@@ -730,6 +736,16 @@ function bindGhostSetupDrag() {
       }
       if (ghostSetupDrag.moved) {
         event.preventDefault();
+        let preview = document.querySelector(".ghost-drag-preview");
+        if (!preview) {
+          preview = cell.querySelector(".ghost-piece").cloneNode(true);
+          preview.classList.add("ghost-drag-preview");
+          preview.setAttribute("aria-hidden", "true");
+          preview.tabIndex = -1;
+          document.body.append(preview);
+        }
+        preview.style.left = `${event.clientX - 25}px`;
+        preview.style.top = `${event.clientY - 25}px`;
         markGhostSetupDragTarget(getGhostSetupCellAt(event.clientX, event.clientY));
       }
     });
@@ -748,6 +764,10 @@ function bindGhostSetupDrag() {
       if (drag.moved && targetIndex !== null && targetIndex !== drag.fromIndex) {
         swapGhostSetupSlots(drag.fromIndex, targetIndex);
         renderGhostSetup();
+        for (const index of [drag.fromIndex, targetIndex]) {
+          document.querySelector(`[data-slot-index="${index}"]`).classList.add("swapped");
+        }
+        showToast("コマを入れ替えました");
         return;
       }
       if (!drag.moved) {
@@ -762,10 +782,25 @@ function bindGhostSetupDrag() {
         clearGhostSetupDragClasses();
       }
     });
+    cell.addEventListener("lostpointercapture", () => {
+      if (ghostSetupDrag && ghostSetupDrag.fromIndex === slotIndex) {
+        ghostSetupDrag = null;
+        clearGhostSetupDragClasses();
+      }
+    });
+    cell.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        ghostSetupKinds[slotIndex] = ghostSetupKinds[slotIndex] === "good" ? "bad" : "good";
+        renderGhostSetup();
+      }
+    });
   });
 }
 
 function renderGhostSetup() {
+  ghostSetupDrag = null;
+  clearGhostSetupDragClasses();
   setScreenMode("ghost");
   const alreadyReady = Boolean(state.me.ready);
   const goodCount = ghostSetupKinds.filter((kind) => kind === "good").length;
@@ -817,46 +852,62 @@ function renderGhostCounts() {
   `;
 }
 
-function renderGhostLog() {
-  if (!state.ghost.log.length) {
-    return `<div class="ghost-log empty">まだ移動はありません</div>`;
+function updateGhostFeedback(message) {
+  if (message.gameType !== "ghost" || message.status === "setup" || message.status === "waiting") {
+    ghostFeedback = null;
+    clearTimeout(ghostFeedbackTimer);
+    return;
   }
-  return `
-    <div class="ghost-log">
-      ${state.ghost.log.slice(-4).reverse().map((entry) => {
-        const side = entry.side === "me" ? "あなた" : "相手";
-        const action = entry.action === "capture"
-          ? `捕獲 ${ghostKindLabel(entry.capturedKind)}`
-          : entry.action === "escape" ? "脱出" : entry.action === "timeout" ? "時間切れ" : "移動";
-        return `<div><b>${side}</b><span>${action}</span></div>`;
-      }).join("")}
-    </div>
-  `;
+  const latest = message.ghost.log.at(-1);
+  const previous = state?.gameType === "ghost" ? state.ghost.log.at(-1) : null;
+  if (!state || !latest || latest.eventId === previous?.eventId || latest.action !== "capture") return;
+  const mine = latest.side === "me";
+  const blue = latest.capturedKind === "good";
+  ghostFeedback = {
+    kind: blue ? "good" : "bad",
+    tone: mine === blue ? "success" : "danger",
+    text: blue ? mine ? "青を捕獲！" : "青を取られた！" : mine ? "しまった、赤だ！" : "赤を取らせた！"
+  };
+  clearTimeout(ghostFeedbackTimer);
+  ghostFeedbackTimer = setTimeout(() => {
+    ghostFeedback = null;
+    const feedback = document.querySelector(".ghost-feedback");
+    if (feedback) {
+      feedback.className = "ghost-feedback";
+      feedback.replaceChildren();
+    }
+  }, 5000);
+}
+
+function renderGhostFeedback() {
+  return `<div class="ghost-feedback ${ghostFeedback ? ghostFeedback.tone : ""}" role="status" aria-live="polite">
+    ${ghostFeedback ? `<span class="feedback-piece ${ghostFeedback.kind}" aria-hidden="true">${ghostKindLabel(ghostFeedback.kind)}</span><strong>${ghostFeedback.text}</strong>` : ""}
+  </div>`;
 }
 
 function renderGhostGame() {
   setScreenMode("ghost");
   const selected = state.ghost.pieces.find((piece) => piece.id === selectedGhostPieceId);
   const ended = state.status === "ended";
-  const title = ended
-    ? state.winner.side === "me" ? "勝ち" : "負け"
-    : state.isMyTurn ? "あなたのターン" : "相手のターン";
+  const won = ended && state.winner?.side === "me";
   app.innerHTML = `
     <section class="ghost-screen play">
-      <header class="ghost-header">
+      <header class="ghost-header ${ended ? "finished" : state.isMyTurn ? "my-turn" : "their-turn"}">
         <div>
           <p>Ghost Duel</p>
-          <h2>${title}</h2>
+          <h2>${ended ? "対戦結果" : state.isMyTurn ? "あなたのターン" : "相手のターン"}</h2>
         </div>
-        ${ended ? `<span>${ghostWinText(state.ghost.winReason)}</span>` : `<span class="turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}
+        ${ended ? "" : `<span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}
       </header>
+      ${ended ? `<section class="result-banner ghost-result ${won ? "win" : "lose"}" aria-label="対戦結果">
+        <h2>${won ? "WIN" : "Lose"}</h2><p>${ghostWinText(state.ghost.winReason, won)}</p>
+      </section>` : ""}
       ${renderGhostCounts()}
+      ${ended ? "" : renderGhostFeedback()}
       ${renderGhostBoard()}
-      <div class="ghost-panel">
-        <div class="ghost-help">${state.isMyTurn ? "自分のコマを選んで、移動先をタップ" : "相手の手を待っています"}</div>
+      ${!ended ? `<div class="ghost-panel">
         ${selected && isGhostExitReady(selected) && state.isMyTurn ? `<button id="ghostEscape" class="button">青を脱出させる</button>` : ""}
-        ${renderGhostLog()}
-      </div>
+      </div>` : ""}
       ${ended ? `
         <div class="ghost-actions">
           <button id="rematch" class="button" type="button" ${state.me.rematch || !state.opponent ? "disabled" : ""}>${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
