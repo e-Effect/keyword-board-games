@@ -121,7 +121,7 @@ function renderDetail() {
   }
   const winner = room.players.find((p) => p.winner);
   detail.innerHTML = `<header class="detail-header"><div><h2>${gameName(room)} <span class="status ${room.status}">${statusNames[room.status]}</span></h2>
-    <p>#${room.id.slice(0, 8)}${room.finalAnswer ? " ／ 後攻の最終回答" : ""}</p></div><span class="timer" ${room.deadline && room.status !== "ended" ? `data-deadline="${room.deadline}"` : ""}>${room.timeLimitSeconds === 0 ? "無制限" : `${room.timeLimitSeconds}秒`}</span></header>
+    <p>#${room.id.slice(0, 8)}${room.reconnectDeadlineAt ? " ／ 再接続待ち" : room.finalAnswer ? " ／ 後攻の最終回答" : ""}</p></div><span class="timer" ${room.deadline && room.status !== "ended" ? `data-deadline="${room.deadline}"` : ""}>${room.reconnectDeadlineAt ? "時間停止中" : room.timeLimitSeconds === 0 ? "無制限" : `${room.timeLimitSeconds}秒`}</span></header>
     ${room.status === "ended" ? `<div class="result">${room.result === "draw" ? "Draw" : winner ? `${escapeHtml(winner.nickname)} WIN` : "対戦終了"}</div>` : ""}
     <div class="duel">${room.players.map((player) => room.gameType === "ghost" ? renderGhost(room, player) : renderHitblow(room, player)).join("")}${room.players.length < 2 ? `<p class="empty">相手の入室待ち</p>` : ""}</div>`;
   updateTimers();

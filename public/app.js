@@ -2,6 +2,7 @@ const PLAYER_ID_KEY = "hitblow.playerId";
 const NICKNAME_KEY = "hitblow.nickname";
 const TIME_LIMIT_KEY = "hitblow.timeLimitSeconds";
 const GAME_TYPE_KEY = "hitblow.gameType";
+const MATCH_KEY = "games.activeMatch.v1";
 const app = document.querySelector("#app");
 const connection = document.querySelector("#connection");
 const toast = document.querySelector("#toast");
@@ -30,6 +31,11 @@ let reconnectTimer = null;
 let joinMode = null;
 let selectedGame = null;
 let joining = false;
+let resuming = false;
+let superseded = false;
+let connectionStatus = "connecting";
+let lastAnimatedGhostMove = null;
+let localRemainingSeconds = null;
 
 function timeLabel(seconds) {
   return seconds === 0 ? "無制限" : `${seconds}秒`;
@@ -48,6 +54,91 @@ function makePlayerId() {
 }
 
 const playerId = makePlayerId();
+
+function savedMatch(storage) {
+  try {
+    const value = JSON.parse(storage.getItem(MATCH_KEY));
+    return value?.playerId === playerId && ["hitblow", "ghost"].includes(value.gameType) && typeof value.keyword === "string" && value.keyword.length > 0 ? value : null;
+  } catch { return null; }
+}
+
+function saveMatch() {
+  const value = JSON.stringify({ playerId, nickname: state.me.nickname, keyword: joinDraft.keyword, gameType: state.gameType, length: state.rules.length, timeLimitSeconds: state.rules.timeLimitSeconds });
+  try { sessionStorage.setItem(MATCH_KEY, value); localStorage.setItem(MATCH_KEY, value); } catch {}
+}
+
+function forgetMatch() {
+  try {
+    sessionStorage.removeItem(MATCH_KEY);
+    const value = savedMatch(localStorage);
+    if (value?.gameType === joinDraft.gameType && value?.keyword === joinDraft.keyword) localStorage.removeItem(MATCH_KEY);
+  } catch {}
+}
+
+function resumeMatch(value) {
+  joinDraft = { ...joinDraft, ...value };
+  selectedGame = value.gameType;
+  resuming = true;
+  superseded = false;
+  if (socket?.readyState === WebSocket.OPEN) sendJoin();
+  else if (!socket || socket.readyState !== WebSocket.CONNECTING) connect();
+  render();
+}
+
+function canPlay() {
+  return state?.status === "playing" && !state.reconnectDeadlineAt && connectionStatus === "ready";
+}
+
+function matchStatusMarkup() {
+  if (!state) return "";
+  const mine = escapeHtml(state.me.nickname);
+  const other = escapeHtml(state.opponent?.nickname || state.answers?.opponent?.nickname || "相手待ち");
+  return `<div class="match-identities"><span><i class="status-dot ${connectionStatus === "ready" ? "online" : ""}"></i>${mine}<small>あなた</small></span><span><i class="status-dot ${state.opponent?.connected ? "online" : ""}"></i>${other}<small>相手</small></span></div>`;
+}
+
+function updateConnectionNotice() {
+  const notice = document.querySelector("#matchConnectionNotice");
+  if (!notice || !state) return;
+  let text = "";
+  if (superseded) text = "別の画面で対戦が開かれました。この画面は接続を停止しています。";
+  else if (connectionStatus !== "ready") text = "通信が切れました。再接続しています…";
+  else if (state.reconnectDeadlineAt) {
+    const remaining = Math.max(0, Math.ceil((state.reconnectDeadlineAt - state.serverNow - (Date.now() - state.receivedAt)) / 1000));
+    text = `相手の再接続待ち · あと${remaining}秒（対戦時間は停止中）`;
+  }
+  notice.hidden = !text || state.status === "ended";
+  notice.textContent = text;
+}
+
+function matchNoticeMarkup() {
+  return `<p id="matchConnectionNotice" class="match-notice" role="status" hidden></p>`;
+}
+
+function openResignDialog() {
+  if (document.querySelector("#resignDialog")) return;
+  const dialog = document.createElement("dialog");
+  dialog.id = "resignDialog";
+  dialog.className = "resign-dialog";
+  dialog.setAttribute("aria-labelledby", "resignTitle");
+  const connected = socket?.readyState === WebSocket.OPEN;
+  dialog.innerHTML = `<h2 id="resignTitle">${connected ? "投了しますか？" : "対戦を終了しますか？"}</h2><p>${connected ? "この対戦はあなたの負けになります。" : "通信が切れているため、再接続の猶予が終わると敗北になります。"}</p><div><button id="cancelResign" class="button secondary" type="button">続ける</button><button id="confirmResign" class="button" type="button">${connected ? "投了する" : "メインに戻る"}</button></div>`;
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelector("#cancelResign").addEventListener("click", close);
+  dialog.querySelector("#confirmResign").addEventListener("click", () => {
+    if (socket?.readyState === WebSocket.OPEN) send({ type: "resign" });
+    else {
+      forgetMatch(); state = null; resuming = false; selectedGame = null; joinMode = null; superseded = false;
+      render();
+      if (!socket || socket.readyState === WebSocket.CLOSED) connect();
+    }
+    close();
+  });
+  dialog.addEventListener("cancel", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+document.addEventListener("click", (event) => { if (event.target.closest("[data-resign]")) openResignDialog(); });
 
 function escapeHtml(value) {
   return String(value)
@@ -111,6 +202,8 @@ function renderMatchStats() {
 }
 
 function getRemainingSeconds() {
+  if (state?.status === "playing" && state.reconnectDeadlineAt) return state.pausedRemainingMs === null ? null : Math.ceil(state.pausedRemainingMs / 1000);
+  if (state?.status === "playing" && connectionStatus !== "ready") return localRemainingSeconds;
   const deadline = state && (state.status === "setup" ? state.setupDeadlineAt : state.turnDeadlineAt);
   if (!state || !deadline || !state.serverNow) {
     return null;
@@ -121,6 +214,7 @@ function getRemainingSeconds() {
 }
 
 function updateCountdown() {
+  updateConnectionNotice();
   const timers = document.querySelectorAll(".turn-timer");
   if (!timers.length || !state) {
     return;
@@ -165,6 +259,8 @@ function showToast(message) {
 }
 
 function setConnection(status) {
+  if (status !== "ready" && connectionStatus === "ready" && state?.status === "playing") localRemainingSeconds = getRemainingSeconds();
+  connectionStatus = status;
   connection.className = "connection";
   if (status === "ready") {
     connection.textContent = "接続済み";
@@ -175,6 +271,7 @@ function setConnection(status) {
   } else {
     connection.textContent = "接続中";
   }
+  updateConnectionNotice();
 }
 
 function send(payload) {
@@ -193,7 +290,7 @@ function connect() {
 
   socket.addEventListener("open", () => {
     setConnection("ready");
-    if (state && joinDraft.keyword) {
+    if ((state || resuming) && joinDraft.keyword) {
       sendJoin();
     }
   });
@@ -202,6 +299,7 @@ function connect() {
     const message = JSON.parse(event.data);
     if (message.type === "state") {
       joining = false;
+      resuming = false;
       updateGhostFeedback(message);
       if (message.status === "setup" && (!state || state.status !== "setup")) {
         secretDigits = [];
@@ -212,22 +310,29 @@ function connect() {
         selectedGhostPieceId = null;
       }
       state = message;
+      if (state.gameType === "ghost" && state.status === "setup" && state.me.ready && state.ghost.mySetup) ghostSetupKinds = [...state.ghost.mySetup];
+      if (state.status === "ended") { const dialog = document.querySelector("#resignDialog"); if (dialog) { dialog.close(); dialog.remove(); } }
       state.receivedAt = Date.now();
+      saveMatch();
       render();
       updateCountdown();
       return;
     }
     if (message.type === "error") {
       joining = false;
-      if (message.code === "room_missing" && state) {
+      if (message.code === "room_missing" && (state || resuming)) {
+        forgetMatch();
         state = null;
         joinMode = null;
+        selectedGame = null;
+        resuming = false;
       }
       if (!state) render();
       showToast(message.message);
       return;
     }
     if (message.type === "left") {
+      forgetMatch();
       state = null;
       joinMode = null;
       selectedGame = null;
@@ -241,8 +346,15 @@ function connect() {
     }
   });
 
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
+    if (event.code === 4000) {
+      superseded = true;
+      setConnection("offline");
+      if (state) render();
+      return;
+    }
     setConnection("offline");
+    if (state) render();
     if (!state && joining) {
       joining = false;
       render();
@@ -260,7 +372,7 @@ function sendJoin() {
     type: "join",
     playerId,
     nickname: joinDraft.nickname,
-    action: state ? "resume" : joinMode,
+    action: state || resuming ? "resume" : joinMode,
     length: joinDraft.length,
     keyword: joinDraft.keyword,
     timeLimitSeconds: joinDraft.timeLimitSeconds,
@@ -273,7 +385,7 @@ function ghostArt(kind = "unknown") {
 }
 
 function ghostRulesButton() {
-  return `<button class="rules-button" type="button" data-ghost-rules><span aria-hidden="true">?</span>ルール</button>`;
+  return `<button class="rules-button" type="button" data-ghost-rules title="ルール"><span aria-hidden="true">?</span>ルール</button>`;
 }
 
 document.addEventListener("click", (event) => {
@@ -299,6 +411,7 @@ document.addEventListener("click", (event) => {
 });
 
 function renderGamePicker() {
+  const previousMatch = savedMatch(localStorage);
   app.innerHTML = `
     <section class="game-picker">
       <h2>ゲームを選ぶ</h2>
@@ -312,7 +425,9 @@ function renderGamePicker() {
           <span class="game-cover-label"><small>GHOST DUEL</small><strong>ゴースト</strong><span class="cover-arrow" aria-hidden="true">→</span></span>
         </button>
       </div>
+      ${previousMatch ? `<button id="resumeMatch" class="button resume-match" type="button">前の対戦に戻る</button>` : ""}
     </section>`;
+  document.querySelector("#resumeMatch")?.addEventListener("click", () => resumeMatch(previousMatch));
   for (const [id, game] of [["chooseHitblow", "hitblow"], ["chooseGhost", "ghost"]]) {
     document.querySelector(`#${id}`).addEventListener("click", () => {
       selectedGame = game;
@@ -441,6 +556,7 @@ function playerStatus(player, emptyText) {
   if (!player) {
     return emptyText;
   }
+  if (state.status === "ended") return player.rematch ? "再戦待ち" : "対戦終了";
   if (!player.connected) {
     return "再接続待ち";
   }
@@ -472,7 +588,7 @@ function renderPlayers() {
 function setScreenMode(mode) {
   document.body.dataset.screen = mode;
   document.body.dataset.game = state ? state.gameType : selectedGame || "home";
-  document.querySelector(".topbar h1").textContent = !state && !selectedGame ? "ふたりのゲーム" : (state ? state.gameType : selectedGame) === "ghost" ? "ゴースト" : "ヒット＆ブロー";
+  document.querySelector(".topbar h1").textContent = !state && !selectedGame ? "ふたりのひみつ" : (state ? state.gameType : selectedGame) === "ghost" ? "ゴースト" : "ヒット＆ブロー";
 }
 
 function splitDigits(value) {
@@ -516,12 +632,12 @@ function renderCardStrip(values, concealed = false) {
 
 function renderDuelSide(side) {
   const isMe = side === "me";
-  const player = isMe ? state.me : state.opponent;
+  const player = (isMe ? state.me : state.opponent) || state.answers?.[side];
   const status = playerStatus(player, "待機中");
   const selectedDigits = isMe && state.status === "setup" && !state.me.ready
     ? secretDigits
     : splitDigits(player && player.secret);
-  const concealed = !isMe;
+  const concealed = !isMe && state.status !== "ended";
   const stripValues = concealed ? [] : selectedDigits;
 
   return `
@@ -529,7 +645,7 @@ function renderDuelSide(side) {
       <div class="player-info">
         ${isMe ? renderAvatar() : ""}
         <div class="player-copy">
-          <strong>${playerName(player, isMe ? "あなた" : "NoName")}</strong>
+          <strong><i class="status-dot ${isMe ? connectionStatus === "ready" ? "online" : "" : player?.connected ? "online" : ""}"></i>${playerName(player, isMe ? "あなた" : "NoName")}</strong>
           <span>${isMe ? "あなた" : "相手"} / ${escapeHtml(status)}</span>
         </div>
         ${isMe ? "" : renderAvatar()}
@@ -632,6 +748,9 @@ function ghostKindLabel(kind) {
 }
 
 function ghostWinText(reason, won) {
+  if (reason === "resigned") return won ? "相手が投了しました" : "あなたが投了しました";
+  if (reason === "opponent-left") return won ? "相手が対戦から退出しました" : "対戦から退出しました";
+  if (reason === "disconnect-timeout") return state.result === "double-loss" ? "両者とも再接続できませんでした" : won ? "相手が再接続できなかったため勝利です" : "再接続の猶予が終了しました";
   if (reason === "escape") {
     return won ? "水色のおばけが脱出！" : "相手の水色のおばけが脱出しました";
   }
@@ -663,7 +782,7 @@ function isAdjacentToSelected(row, col) {
 }
 
 function renderGhostPiece(piece) {
-  const label = piece.owner === "me" ? `${ghostKindLabel(piece.kind)}のおばけ` : "相手のおばけ";
+  const label = piece.owner === "me" ? `${ghostKindLabel(piece.kind)}のおばけ` : state.status === "ended" ? `相手の${ghostKindLabel(piece.kind)}のおばけ` : "相手のおばけ";
   return `
     <button class="ghost-piece ${piece.owner} ${piece.kind}" type="button" data-piece-id="${piece.id}" aria-label="${label}">
       ${ghostArt(piece.kind)}
@@ -673,6 +792,7 @@ function renderGhostPiece(piece) {
 
 function renderGhostBoard() {
   const rows = [];
+  const lastMove = state.ghost.log.filter((entry) => entry.from && entry.to).at(-1);
   for (let viewRow = 0; viewRow < 6; viewRow += 1) {
     for (let viewCol = 0; viewCol < 6; viewCol += 1) {
       const board = ghostViewToBoard(viewRow, viewCol);
@@ -681,8 +801,10 @@ function renderGhostBoard() {
       const target = Boolean(selectedGhostPieceId && (!piece || piece.owner === "opponent"));
       const legalish = selectedGhostPieceId && isAdjacentToSelected(board.row, board.col);
       const exitSquare = (board.row === 0 || board.row === 5) && (board.col === 0 || board.col === 5);
+      const lastFrom = lastMove?.from.row === board.row && lastMove?.from.col === board.col;
+      const lastTo = lastMove?.to.row === board.row && lastMove?.to.col === board.col;
       rows.push(`
-        <div class="ghost-cell ${selected ? "selected" : ""} ${legalish && target ? "target" : ""} ${exitSquare ? "exit" : ""}" data-row="${board.row}" data-col="${board.col}">
+        <div class="ghost-cell ${selected ? "selected" : ""} ${legalish && target ? "target" : ""} ${exitSquare ? "exit" : ""} ${lastFrom ? "last-from" : ""} ${lastTo ? "last-to" : ""}" data-row="${board.row}" data-col="${board.col}" ${lastFrom || lastTo ? `aria-label="直前の移動${lastFrom ? "元" : "先"}"` : ""}>
           ${piece ? renderGhostPiece(piece) : ""}
         </div>
       `);
@@ -693,7 +815,7 @@ function renderGhostBoard() {
 
 function renderGhostField(board) {
   const selected = state.ghost.pieces.find((piece) => piece.id === selectedGhostPieceId);
-  const ready = state.status === "playing" && state.isMyTurn && isGhostExitReady(selected);
+  const ready = canPlay() && state.isMyTurn && isGhostExitReady(selected);
   const selectedCol = selected ? ghostToView(selected.row, selected.col).col : null;
   const doors = (mine) => `<div class="ghost-exits ${mine ? "own-exits" : "opponent-exits"}">
     ${[0, 5].map((col) => `<button type="button" class="ghost-door ${ready && mine && selectedCol === col ? "available" : ""}" data-ghost-escape="${col}" aria-label="${mine ? "あなた" : "相手"}の${col === 0 ? "左" : "右"}の脱出口" ${ready && mine && selectedCol === col ? "" : "disabled"}><span class="door-art" aria-hidden="true"><i></i></span><span class="door-arrow" aria-hidden="true">${mine ? "↑" : "↓"}</span></button>`).join("")}
@@ -1010,14 +1132,17 @@ function renderGhostGame() {
           <p>GHOST DUEL</p>
           <h2>${ended ? "対戦結果" : state.isMyTurn ? "あなたのターン" : "相手のターン"}</h2>
         </div>
-        <div class="ghost-header-tools">${ghostRulesButton()}${ended ? "" : `<span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}</div>
+        <div class="ghost-header-tools">${ghostRulesButton()}${ended ? "" : `<button class="resign-trigger" type="button" data-resign aria-label="投了" title="投了">⚑</button><span class="ghost-time turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}</div>
       </header>
+      ${matchStatusMarkup()}
+      ${matchNoticeMarkup()}
       ${ended ? `<section class="result-banner ghost-result ${won ? "win" : "lose"}" aria-label="対戦結果">
         <h2>${won ? "WIN" : "Lose"}</h2><p>${ghostWinText(state.ghost.winReason, won)}</p>
       </section>` : ""}
       ${renderGhostCounts()}
       ${ended ? "" : renderGhostFeedback()}
       ${renderGhostBoard()}
+      ${ended ? `<p class="answer-label">答え合わせ · 相手の色を公開しています</p>` : ""}
       ${ended ? `
         <div class="ghost-actions">
           <button id="rematch" class="button" type="button" ${state.me.rematch || !state.opponent ? "disabled" : ""}>${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
@@ -1027,7 +1152,20 @@ function renderGhostGame() {
     </section>
   `;
 
-  if (state.status === "playing" && state.isMyTurn) {
+  updateConnectionNotice();
+  const move = state.ghost.log.filter((entry) => entry.from && entry.to && ["move", "capture"].includes(entry.action)).at(-1);
+  const animationKey = move ? `${state.ghost.pieces[0]?.id}:${move.eventId}` : null;
+  if (move && animationKey !== lastAnimatedGhostMove && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    lastAnimatedGhostMove = animationKey;
+    const from = document.querySelector(`[data-row="${move.from.row}"][data-col="${move.from.col}"]`);
+    const to = document.querySelector(`[data-row="${move.to.row}"][data-col="${move.to.col}"]`);
+    const piece = to?.querySelector(".ghost-piece");
+    if (from && piece) {
+      const a = from.getBoundingClientRect(); const b = to.getBoundingClientRect();
+      piece.animate([{ transform: `translate(${a.left - b.left}px,${a.top - b.top}px)` }, { transform: "translate(0,0)" }], { duration: 260, easing: "ease-out" });
+    }
+  }
+  if (canPlay() && state.isMyTurn) {
     document.querySelectorAll(".ghost-cell").forEach((cell) => {
       cell.addEventListener("click", () => {
         const row = Number(cell.dataset.row);
@@ -1177,8 +1315,8 @@ function renderHistory(title, side) {
 }
 
 function renderHistoryTable(title, side) {
-  const rows = state.guesses.filter((guess) => guess.side === side).slice(-6);
-  const filledRows = Array.from({ length: 6 }, (_, index) => rows[index] || null);
+  const rows = state.guesses.filter((guess) => guess.side === side);
+  const filledRows = Array.from({ length: Math.max(6, rows.length) }, (_, index) => rows[index] || null);
   return `
     <section class="duel-history ${side}">
       <header>
@@ -1260,6 +1398,7 @@ function renderResult() {
   const labels = { win: "WIN", lose: "Lose", draw: "Draw" };
   const detail = state.endReason === "setup-timeout"
     ? state.result === "double-loss" ? "両者とも数字設定が時間切れです" : "数字設定の時間切れで決着しました"
+    : ["resigned", "disconnect-timeout", "opponent-left"].includes(state.endReason) ? ghostWinText(state.endReason, result === "win")
     : state.result === "draw" ? "両者正解、引き分けです" : result === "win" ? "あなたの勝ちです" : "相手の勝ちです";
   return `<section class="result-banner ${result}" aria-label="対戦結果">
     <h2>${labels[result]}</h2><p>${detail}</p>
@@ -1267,24 +1406,28 @@ function renderResult() {
 }
 
 function renderGame() {
+  const historyScroll = [...document.querySelectorAll(".duel-history-rows")].map((element) => ({ top: element.scrollTop, atBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 4 }));
   setScreenMode("arena");
   app.innerHTML = `
     <section class="arena-screen play-screen">
       ${renderDuelHeader()}
+      ${matchNoticeMarkup()}
       ${state.status === "ended" ? renderResult() : `
         <div class="arena-message ${state.isMyTurn ? "active" : ""}">
           <strong>${state.isMyTurn ? "あなたのターン" : "相手のターン"}</strong>
           <span class="timer-pill turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>
+          <button class="resign-trigger" type="button" data-resign aria-label="投了" title="投了">⚑</button>
         </div>
         ${state.finalAnswer ? `<div class="final-answer">${state.isMyTurn ? "最後の回答です。正解すればDraw！" : "後攻の最後の回答を待っています"}</div>` : ""}
       `}
+      ${state.status === "ended" ? `<p class="answer-label">答え合わせ · 両者の数字を公開しています</p>` : ""}
       ${renderHistoryBoard()}
       ${state.status === "playing"
         ? renderInputDeck({
             mode: "guess",
             digits: guessDigits,
             prompt: state.isMyTurn ? "相手の数字を推理してください" : "相手の入力を待っています",
-            active: state.isMyTurn && state.opponent.connected
+            active: state.isMyTurn && state.opponent.connected && canPlay()
           })
         : ""}
       ${state.status === "ended" ? `
@@ -1296,7 +1439,8 @@ function renderGame() {
     </section>
   `;
 
-  if (state.status === "playing" && state.isMyTurn && state.opponent.connected) {
+  updateConnectionNotice();
+  if (canPlay() && state.isMyTurn && state.opponent.connected) {
     bindDigitControls("guess", guessDigits, renderGame);
     document.querySelector("#submitGuess").addEventListener("click", () => {
       send({ type: "guess", value: guessDigits.join("") });
@@ -1308,12 +1452,18 @@ function renderGame() {
     document.querySelector("#rematch").addEventListener("click", () => send({ type: "rematch" }));
     document.querySelector("#leave").addEventListener("click", () => send({ type: "leave" }));
   }
-  document.querySelectorAll(".duel-history-rows").forEach((rows) => { rows.scrollTop = rows.scrollHeight; });
+  document.querySelectorAll(".duel-history-rows").forEach((rows, index) => { rows.scrollTop = historyScroll[index] && !historyScroll[index].atBottom ? historyScroll[index].top : rows.scrollHeight; });
 }
 
 function render() {
   app.style.setProperty("--digits", state ? state.rules.length : joinDraft.length);
   if (!state) {
+    if (resuming) {
+      setScreenMode("waiting");
+      app.innerHTML = `<section class="panel stack"><h2>対戦に再接続しています…</h2><p class="resume-status" role="status">${escapeHtml(joinDraft.nickname)} · ${joinDraft.gameType === "ghost" ? "ゴースト" : "ヒット＆ブロー"}</p><button id="cancelResume" class="button secondary" type="button">再接続をやめる</button></section>`;
+      document.querySelector("#cancelResume").addEventListener("click", () => { forgetMatch(); resuming = false; state = null; selectedGame = null; joinMode = null; socket?.close(); render(); });
+      return;
+    }
     renderJoin();
     return;
   }
@@ -1340,6 +1490,8 @@ function render() {
   }
 }
 
+const previousTabMatch = savedMatch(sessionStorage);
+if (previousTabMatch) { joinDraft = { ...joinDraft, ...previousTabMatch }; selectedGame = previousTabMatch.gameType; resuming = true; }
 render();
 connect();
 setInterval(updateCountdown, 250);

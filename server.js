@@ -23,6 +23,7 @@ const rooms = new Map();
 const GAME_TYPES = new Set(["hitblow", "ghost"]);
 const BOARD_SIZE = 6;
 const SETUP_TIME_SECONDS = 30;
+const RECONNECT_GRACE_MS = process.env.NODE_ENV === "test" ? Number(process.env.TEST_RECONNECT_GRACE_MS || 60000) : 60000;
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -61,6 +62,10 @@ function makeRoom(roomKey, keywordHash, gameType, timeLimitSeconds = DEFAULT_TUR
     pendingWinnerId: null,
     setupDeadlineAt: null,
     setupTimer: null,
+    reconnectTimer: null,
+    reconnectDeadlineAt: null,
+    pausedRemainingMs: null,
+    finishedPlayers: null,
     createdAt: Date.now(),
     lastActivity: Date.now()
   };
@@ -76,6 +81,7 @@ function clearTurnTimer(room) {
 function deleteRoom(room) {
   clearTurnTimer(room);
   clearSetupTimer(room);
+  clearReconnectTimer(room);
   rooms.delete(room.roomKey);
 }
 
@@ -85,6 +91,7 @@ function clearSetupTimer(room) {
 }
 
 function finishGame(room, winnerId, reason) {
+  room.finishedPlayers = room.players.map((player) => ({ id: player.id, nickname: player.nickname, secret: player.secret, ghostSetup: player.ghostSetup }));
   room.status = "ended";
   room.winnerId = winnerId;
   room.result = winnerId ? "win" : "draw";
@@ -95,6 +102,38 @@ function finishGame(room, winnerId, reason) {
   room.setupDeadlineAt = null;
   clearTurnTimer(room);
   clearSetupTimer(room);
+  clearReconnectTimer(room);
+}
+
+function clearReconnectTimer(room) {
+  clearTimeout(room.reconnectTimer);
+  room.reconnectTimer = null;
+  room.reconnectDeadlineAt = null;
+  room.pausedRemainingMs = null;
+}
+
+function pauseForReconnect(room) {
+  if (room.status !== "playing" || room.reconnectDeadlineAt) return;
+  room.pausedRemainingMs = room.turnDeadlineAt === null ? null : Math.max(0, room.turnDeadlineAt - Date.now());
+  clearTurnTimer(room);
+  room.turnDeadlineAt = null;
+  room.reconnectDeadlineAt = Date.now() + RECONNECT_GRACE_MS;
+  room.reconnectTimer = setTimeout(() => {
+    if (room.status !== "playing" || !room.reconnectDeadlineAt) return;
+    const connected = room.players.filter((player) => player.connected);
+    finishGame(room, connected.length === 1 ? connected[0].id : null, "disconnect-timeout");
+    if (connected.length === 0) room.result = "double-loss";
+    if (room.gameType === "ghost") room.ghost.winReason = "disconnect-timeout";
+    broadcastRoom(room);
+  }, RECONNECT_GRACE_MS);
+}
+
+function resumeAfterReconnect(room) {
+  if (room.status !== "playing" || !room.reconnectDeadlineAt || !room.players.every((player) => player.connected)) return;
+  const remaining = room.pausedRemainingMs;
+  clearReconnectTimer(room);
+  room.turnDeadlineAt = remaining === null ? null : Date.now() + remaining;
+  scheduleTurnTimer(room);
 }
 
 function expireSetupIfNeeded(room) {
@@ -108,6 +147,7 @@ function expireSetupIfNeeded(room) {
 
 function startSetup(room) {
   clearSetupTimer(room);
+  room.finishedPlayers = null;
   room.status = "setup";
   room.setupDeadlineAt = room.gameType === "hitblow" ? Date.now() + SETUP_TIME_SECONDS * 1000 : null;
   if (room.setupDeadlineAt) {
@@ -125,6 +165,7 @@ function makeGhostState() {
 }
 
 function getPlayerIndex(room, player) {
+  if (room.status === "ended" && room.finishedPlayers) return room.finishedPlayers.findIndex((candidate) => candidate.id === player.id);
   return room.players.findIndex((candidate) => candidate.id === player.id);
 }
 
@@ -181,7 +222,7 @@ function pieceAt(room, row, col) {
 
 function publicGhostState(room, player) {
   const myIndex = getPlayerIndex(room, player);
-  const opponent = getOpponent(room, player);
+  const opponent = getOpponent(room, player) || room.finishedPlayers?.find((candidate) => candidate.id !== player.id);
   const alivePieces = room.ghost.pieces.filter((piece) => piece.alive);
   const captured = room.ghost.pieces.filter((piece) => !piece.alive && !piece.escaped);
   const countsFor = (ownerId) => ({
@@ -195,11 +236,12 @@ function publicGhostState(room, player) {
     boardSize: BOARD_SIZE,
     myIndex,
     myStartSlots: startSlotsForIndex(myIndex),
+    mySetup: player.ghostSetup ? [...player.ghostSetup] : null,
     pieces: alivePieces.map((piece) => ({
       id: piece.id,
       owner: piece.ownerId === player.id ? "me" : "opponent",
       ownerIndex: piece.ownerIndex,
-      kind: piece.ownerId === player.id ? piece.kind : "unknown",
+      kind: piece.ownerId === player.id || room.status === "ended" ? piece.kind : "unknown",
       row: piece.row,
       col: piece.col
     })),
@@ -217,6 +259,8 @@ function publicGhostState(room, player) {
       action: entry.action,
       pieceKind: entry.playerId === player.id ? entry.pieceKind : "unknown",
       capturedKind: entry.capturedKind || null,
+      from: entry.from || null,
+      to: entry.to || null,
       createdAt: entry.createdAt
     })),
     winReason: room.ghost.winReason
@@ -234,7 +278,7 @@ function isExitMove(piece, to) {
 }
 
 function inBoard(row, col) {
-  return row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE;
+  return Number.isInteger(row) && Number.isInteger(col) && row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE;
 }
 
 function setGhostWinner(room, winnerId, reason) {
@@ -278,7 +322,8 @@ function startTurn(room, turnIndex) {
   room.turnIndex = turnIndex;
   room.turnStartedAt = Date.now();
   room.turnDeadlineAt = room.timeLimitSeconds === 0 ? null : room.turnStartedAt + room.timeLimitSeconds * 1000;
-  scheduleTurnTimer(room);
+  if (room.players.some((player) => !player.connected)) pauseForReconnect(room);
+  else scheduleTurnTimer(room);
 }
 
 function advanceTurn(room) {
@@ -370,6 +415,8 @@ function stateFor(room, player) {
     endReason: room.endReason,
     finalAnswer: Boolean(room.pendingWinnerId),
     setupDeadlineAt: room.setupDeadlineAt,
+    reconnectDeadlineAt: room.reconnectDeadlineAt,
+    pausedRemainingMs: room.pausedRemainingMs,
     serverNow: Date.now(),
     status: room.status,
     rules: {
@@ -380,7 +427,11 @@ function stateFor(room, player) {
     turnStartedAt: room.status === "playing" ? room.turnStartedAt : null,
     turnDeadlineAt: room.status === "playing" ? room.turnDeadlineAt : null,
     me: publicPlayer(player, { gameType: room.gameType, revealSecret: true }),
-    opponent: publicPlayer(opponent, { gameType: room.gameType }),
+    opponent: publicPlayer(opponent, { gameType: room.gameType, revealSecret: room.status === "ended" }),
+    answers: room.status === "ended" ? {
+      me: room.finishedPlayers?.find((candidate) => candidate.id === player.id) ? { nickname: player.nickname, secret: player.secret } : null,
+      opponent: (() => { const other = room.finishedPlayers?.find((candidate) => candidate.id !== player.id); return other ? { nickname: other.nickname, secret: other.secret } : null; })()
+    } : null,
     isMyTurn: Boolean(turnPlayer && turnPlayer.id === player.id),
     turn: turnPlayer
       ? {
@@ -391,7 +442,7 @@ function stateFor(room, player) {
     winner: room.winnerId
       ? {
           side: room.winnerId === player.id ? "me" : "opponent",
-          nickname: (room.players.find((item) => item.id === room.winnerId) || {}).nickname || ""
+          nickname: (room.players.find((item) => item.id === room.winnerId) || room.finishedPlayers?.find((item) => item.id === room.winnerId) || {}).nickname || ""
         }
       : null,
     guesses: room.guesses.map((guess) => ({
@@ -505,6 +556,7 @@ function handleJoin(socket, session, message) {
   }
 
   attachPlayerSocket(room, player, socket, session);
+  resumeAfterReconnect(room);
 
   if (room.players.length === 2 && room.status === "waiting") {
     startSetup(room);
@@ -593,6 +645,7 @@ function handleGhostMove(socket, session, message) {
     return;
   }
   const { room, player } = session;
+  if (room.reconnectDeadlineAt) return sendError(socket, "相手の再接続を待っています。", "game_paused");
   if (room.gameType !== "ghost") {
     sendError(socket, "この部屋では使えない操作です。", "wrong_game");
     return;
@@ -619,8 +672,8 @@ function handleGhostMove(socket, session, message) {
   const to = message.escape
     ? { row: piece.ownerIndex === 0 ? -1 : BOARD_SIZE, col: piece.col }
     : {
-        row: Number(message.to && message.to.row),
-        col: Number(message.to && message.to.col)
+        row: message.to?.row,
+        col: message.to?.col
       };
 
   let capturedPiece = null;
@@ -678,6 +731,7 @@ function handleGuess(socket, session, message) {
     return;
   }
   const { room, player } = session;
+  if (room.reconnectDeadlineAt) return sendError(socket, "相手の再接続を待っています。", "game_paused");
   if (room.gameType !== "hitblow") {
     sendError(socket, "この部屋では数字予想は使いません。", "wrong_game");
     return;
@@ -746,6 +800,7 @@ function handleRematch(socket, session) {
     room.status = "setup";
     room.guesses = [];
     room.ghost = makeGhostState();
+    room.finishedPlayers = null;
     room.winnerId = null;
     room.result = null;
     room.endReason = null;
@@ -767,6 +822,10 @@ function handleRematch(socket, session) {
 }
 
 function removePlayerFromRoom(room, player) {
+  if (room.status === "playing") {
+    finishGame(room, getOpponent(room, player)?.id || null, "opponent-left");
+    if (room.gameType === "ghost") room.ghost.winReason = "opponent-left";
+  }
   const index = room.players.findIndex((candidate) => candidate.id === player.id);
   if (index >= 0) {
     room.players.splice(index, 1);
@@ -774,9 +833,6 @@ function removePlayerFromRoom(room, player) {
   if (room.players.length === 0) {
     deleteRoom(room);
   } else if (room.status === "ended") {
-    broadcastRoom(room);
-  } else if (room.status === "playing") {
-    finishGame(room, room.players[0].id, "opponent-left");
     broadcastRoom(room);
   } else {
     room.status = "waiting";
@@ -808,6 +864,16 @@ function handleLeave(socket, session) {
   send(socket, { type: "left" });
 }
 
+function handleResign(socket, session) {
+  if (!requireJoined(socket, session)) return;
+  const { room, player } = session;
+  if (room.status !== "playing") return sendError(socket, "対戦中のみ投了できます。", "wrong_phase");
+  const opponent = getOpponent(room, player);
+  finishGame(room, opponent?.id || null, "resigned");
+  if (room.gameType === "ghost") room.ghost.winReason = "resigned";
+  broadcastRoom(room);
+}
+
 function handleDisconnect(session, socket) {
   if (!session.room || !session.player) {
     return;
@@ -819,6 +885,7 @@ function handleDisconnect(session, socket) {
   player.socket = null;
   player.connected = false;
   player.lastSeen = Date.now();
+  pauseForReconnect(room);
   broadcastRoom(room);
 }
 
@@ -852,6 +919,9 @@ function handleSocketMessage(socket, session, raw) {
       break;
     case "leave":
       handleLeave(socket, session);
+      break;
+    case "resign":
+      handleResign(socket, session);
       break;
     default:
       sendError(socket, "未対応の操作です。", "unknown_type");

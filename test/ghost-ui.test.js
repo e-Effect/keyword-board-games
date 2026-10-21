@@ -12,7 +12,8 @@ function renderField({ index = 0, kind = "good", owner = "me", turn = true, row,
   const piece = { id: "selected", owner, kind, row: row ?? (index === 0 ? 0 : 5), col };
   const context = vm.createContext({
     state: { status: "playing", isMyTurn: turn, ghost: { myIndex: index, pieces: [piece] } },
-    selectedGhostPieceId: piece.id
+    selectedGhostPieceId: piece.id,
+    canPlay: () => true
   });
   vm.runInContext(section("ghostToView", "ghostViewToBoard") +
     section("isGhostExitReady", "isAdjacentToSelected") +
@@ -32,6 +33,16 @@ test("external exits face both players and only the correct own door is actionab
       assert.match(html, /相手の脱出口/);
     }
   }
+});
+
+test("Hit and Blow renders every guess instead of discarding early history", () => {
+  const guesses = Array.from({ length: 12 }, (_, index) => ({ side: "me", value: String(100 + index), hits: 0, blows: 1 }));
+  const context = vm.createContext({ state: { guesses }, escapeHtml: String });
+  vm.runInContext(section("renderHistoryTable", "renderHistoryBoard"), context);
+  const html = vm.runInContext('renderHistoryTable("あなたの推理", "me")', context);
+  assert.equal((html.match(/class="duel-history-row"/g) || []).length, 12);
+  assert.match(html, /100/);
+  assert.match(html, /111/);
 });
 
 test("pink ghosts, opponents, wrong turns, and non-exit squares cannot activate doors", () => {

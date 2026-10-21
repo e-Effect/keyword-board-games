@@ -130,6 +130,27 @@ body[data-screen="arena"] .topbar,body[data-screen="ghost"] .topbar { display:no
 .duel-history-row span { text-align:center; font-size:1.1rem; }
 .duel-history-row b { font-size:1rem; border-left:1px solid #e2e9f5; }
 .duel-history-row.empty { color:transparent; }
+.duel-history-rows { height:150px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+.resume-match { width:min(100%,360px); margin:24px auto 0; }
+.resume-status { color:#617795; font-size:.9rem; }
+.status-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#b7bfcc; flex:0 0 7px; margin-right:5px; vertical-align:middle; }
+.status-dot.online { background:#17aa83; }
+.match-identities { display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:.78rem; font-weight:800; color:#49728c; }
+.match-identities>span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.match-identities>span:last-child { text-align:right; }
+.match-identities small { margin-left:5px; font-size:.65rem; color:#7b91a7; }
+.match-notice { margin:0; padding:9px 10px; border:1px solid #f1bc71; border-radius:6px; background:#fff2d5; color:#8b5619; font-size:.8rem; font-weight:800; line-height:1.6; }
+.match-notice[hidden] { display:none; }
+.arena-screen>.match-notice { margin:0 12px 9px; }
+.resign-trigger { display:inline-grid; place-items:center; flex:0 0 32px; width:32px; height:36px; padding:0; border:1px solid #b5c9dd; border-radius:6px; background:#fff; color:#7b6388; font-size:1.2rem; }
+.arena-message .timer-pill { margin-left:auto; }
+.answer-label { text-align:center; color:#567d97; font-size:.76rem; font-weight:800; margin:0 10px 9px; }
+.resign-dialog { width:min(380px,calc(100% - 28px)); padding:22px; border:2px solid #d9c9e1; border-radius:8px; color:var(--ink); background:#fff; }
+.resign-dialog::backdrop { background:#24325b88; }
+.resign-dialog h2 { font-size:1.15rem; }
+.resign-dialog p { margin:14px 0 20px; font-size:.9rem; line-height:1.7; }
+.resign-dialog>div { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.resign-dialog #confirmResign { background:#d94e88; box-shadow:0 3px 0 #a72e64; }
 .duel-history-row.skipped span { font-size:.72rem; color:#8390ae; }
 .final-answer { margin:0 12px 8px; padding:8px; border-radius:6px; background:#fff0a8; color:#816020; font-weight:800; font-size:.82rem; text-align:center; }
 .input-deck { position:relative; padding:15px 14px 4px; margin-top:auto; isolation:isolate; }
@@ -213,6 +234,9 @@ body[data-screen="ghost"] .shell { width:min(100%,540px); padding:0; }
 .ghost-cell.setup.filled { background:#fff; }
 .ghost-cell.target { background:#bbf4df; box-shadow:inset 0 0 0 2px #40c8a4; }
 .ghost-cell.selected { box-shadow:inset 0 0 0 3px #f0b82b; background:#fff0ad; }
+.ghost-cell.last-from::after { content:""; position:absolute; width:22%; height:22%; border-radius:50%; background:#d3a530; opacity:.65; }
+.ghost-cell.last-to { box-shadow:inset 0 0 0 2px #d5a728; }
+.ghost-cell.last-to.selected { box-shadow:inset 0 0 0 3px #f0b82b; }
 .ghost-piece { position:relative; display:grid; place-items:center; width:100%; height:100%; border:0; padding:0; border-radius:5px; background:none; z-index:1; transition:transform .15s,opacity .15s; }
 .ghost-piece .ghost-art { width:100%; height:100%; }
 .ghost-piece:hover { transform:translateY(-2px); }
@@ -281,6 +305,8 @@ body[data-screen="ghost"] .shell { width:min(100%,540px); padding:0; }
   .ghost-screen { gap:9px; }
 }
 @media (max-width:350px) {
+  .ghost-header-tools { gap:5px; }
+  .ghost-header .rules-button { width:36px; min-width:36px; padding:5px; gap:0; font-size:0; }
   .game-cover { min-height:155px; }
   .number-art,.ghost-pair { flex-basis:40%; width:40%; padding:8px; }
   .number-art i { width:31px; height:55px; font-size:1.7rem; }

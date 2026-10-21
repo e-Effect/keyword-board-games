@@ -46,10 +46,11 @@ function sessionCookie(token, request, clear = false) {
 }
 
 function roomSnapshot(room, startSlotsForIndex) {
-  const players = room.players.map((player, index) => ({
+  const sourcePlayers = room.status === "ended" ? room.finishedPlayers || room.players : room.players;
+  const players = sourcePlayers.map((player, index) => ({
     index: room.ghost.pieces.find((piece) => piece.ownerId === player.id)?.ownerIndex ?? index,
     nickname: player.nickname,
-    connected: player.connected,
+    connected: Boolean(room.players.find((live) => live.id === player.id)?.connected),
     ready: room.gameType === "ghost" ? Boolean(player.ghostSetup) : Boolean(player.secret),
     secret: room.gameType === "hitblow" ? player.secret : null,
     winner: player.id === room.winnerId
@@ -70,11 +71,12 @@ function roomSnapshot(room, startSlotsForIndex) {
     timeLimitSeconds: room.timeLimitSeconds,
     length: room.length,
     deadline: room.status === "setup" ? room.setupDeadlineAt : room.turnDeadlineAt,
+    reconnectDeadlineAt: room.reconnectDeadlineAt || null,
     result: room.result,
     endReason: room.gameType === "ghost" ? room.ghost.winReason : room.endReason,
     finalAnswer: Boolean(room.pendingWinnerId),
     guesses: room.guesses.map(({ playerId, value, hits, blows, skipped }) => ({
-      playerIndex: room.players.findIndex((player) => player.id === playerId), value, hits, blows, skipped: Boolean(skipped)
+      playerIndex: sourcePlayers.findIndex((player) => player.id === playerId), value, hits, blows, skipped: Boolean(skipped)
     })),
     pieces: room.gameType === "ghost" ? pieces : []
   };
