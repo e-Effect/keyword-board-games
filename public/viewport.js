@@ -1,4 +1,13 @@
 (function () {
+  const editableSelector = "input, textarea, [contenteditable='true']";
+  for (const type of ["selectstart", "contextmenu", "dragstart"]) {
+    document.addEventListener(type, (event) => {
+      if (!event.target?.closest?.(editableSelector) && event.cancelable) {
+        event.preventDefault();
+      }
+    }, { passive: false });
+  }
+
   function preventGestureZoom(event) {
     if (event.cancelable) event.preventDefault();
   }

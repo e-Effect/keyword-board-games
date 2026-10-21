@@ -16,6 +16,22 @@ function handlers() {
   return listeners;
 }
 
+test("game content cannot be selected, dragged natively, or open a context menu", () => {
+  const listeners = handlers();
+  for (const type of ["selectstart", "contextmenu", "dragstart"]) {
+    for (const editable of [true, false]) {
+      let prevented = false;
+      listeners.get(type)({
+        target: { closest() { return editable ? {} : null; } },
+        cancelable: true,
+        preventDefault() { prevented = true; }
+      });
+      assert.equal(prevented, !editable);
+    }
+    listeners.get(type)({ cancelable: false, preventDefault() { assert.fail("not cancelable"); } });
+  }
+});
+
 test("Safari pinch gestures are canceled without passive listeners", () => {
   const listeners = handlers();
   for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
