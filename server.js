@@ -21,6 +21,7 @@ const WAITING_TTL_MS = 10 * 60 * 1000;
 const rooms = new Map();
 const GAME_TYPES = new Set(["hitblow", "ghost"]);
 const BOARD_SIZE = 6;
+const SETUP_TIME_SECONDS = 30;
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -53,6 +54,11 @@ function makeRoom(roomKey, keywordHash, gameType, timeLimitSeconds = DEFAULT_TUR
     turnDeadlineAt: null,
     turnTimer: null,
     winnerId: null,
+    result: null,
+    endReason: null,
+    pendingWinnerId: null,
+    setupDeadlineAt: null,
+    setupTimer: null,
     createdAt: Date.now(),
     lastActivity: Date.now()
   };
@@ -67,7 +73,44 @@ function clearTurnTimer(room) {
 
 function deleteRoom(room) {
   clearTurnTimer(room);
+  clearSetupTimer(room);
   rooms.delete(room.roomKey);
+}
+
+function clearSetupTimer(room) {
+  clearTimeout(room.setupTimer);
+  room.setupTimer = null;
+}
+
+function finishGame(room, winnerId, reason) {
+  room.status = "ended";
+  room.winnerId = winnerId;
+  room.result = winnerId ? "win" : "draw";
+  room.endReason = reason;
+  room.pendingWinnerId = null;
+  room.turnStartedAt = null;
+  room.turnDeadlineAt = null;
+  room.setupDeadlineAt = null;
+  clearTurnTimer(room);
+  clearSetupTimer(room);
+}
+
+function expireSetupIfNeeded(room) {
+  if (room.status !== "setup" || !room.setupDeadlineAt || Date.now() < room.setupDeadlineAt) return false;
+  const ready = room.players.filter((player) => player.secret);
+  finishGame(room, ready.length === 1 ? ready[0].id : null, "setup-timeout");
+  if (ready.length === 0) room.result = "double-loss";
+  broadcastRoom(room);
+  return true;
+}
+
+function startSetup(room) {
+  clearSetupTimer(room);
+  room.status = "setup";
+  room.setupDeadlineAt = room.gameType === "hitblow" ? Date.now() + SETUP_TIME_SECONDS * 1000 : null;
+  if (room.setupDeadlineAt) {
+    room.setupTimer = setTimeout(() => expireSetupIfNeeded(room), SETUP_TIME_SECONDS * 1000 + 5);
+  }
 }
 
 function makeGhostState() {
@@ -192,12 +235,8 @@ function inBoard(row, col) {
 }
 
 function setGhostWinner(room, winnerId, reason) {
-  room.status = "ended";
-  room.winnerId = winnerId;
+  finishGame(room, winnerId, reason);
   room.ghost.winReason = reason;
-  room.turnStartedAt = null;
-  room.turnDeadlineAt = null;
-  clearTurnTimer(room);
 }
 
 function evaluateGhostWin(room, movingPlayer, capturedPiece, escapedPiece) {
@@ -235,7 +274,7 @@ function scheduleTurnTimer(room) {
 function startTurn(room, turnIndex) {
   room.turnIndex = turnIndex;
   room.turnStartedAt = Date.now();
-  room.turnDeadlineAt = room.turnStartedAt + room.timeLimitSeconds * 1000;
+  room.turnDeadlineAt = room.timeLimitSeconds === 0 ? null : room.turnStartedAt + room.timeLimitSeconds * 1000;
   scheduleTurnTimer(room);
 }
 
@@ -277,7 +316,11 @@ function expireCurrentTurn(room) {
       createdAt: Date.now()
     });
   }
-  advanceTurn(room);
+  if (room.pendingWinnerId) {
+    finishGame(room, room.pendingWinnerId, "final-answer-timeout");
+  } else {
+    advanceTurn(room);
+  }
   broadcastRoom(room);
   return true;
 }
@@ -319,6 +362,11 @@ function stateFor(room, player) {
   const state = {
     type: "state",
     gameType: room.gameType,
+    isFirst: getPlayerIndex(room, player) === room.startingIndex,
+    result: room.result,
+    endReason: room.endReason,
+    finalAnswer: Boolean(room.pendingWinnerId),
+    setupDeadlineAt: room.setupDeadlineAt,
     serverNow: Date.now(),
     status: room.status,
     rules: {
@@ -399,31 +447,41 @@ function handleJoin(socket, session, message) {
   const nickname = String(message.nickname || "").normalize("NFKC").trim().slice(0, 16) || "Player";
   const gameType = GAME_TYPES.has(message.gameType) ? message.gameType : "hitblow";
   const roomKey = `${gameType}:${keywordHash}`;
-  const timeLimitResult = validateTimeLimit(message.timeLimitSeconds || DEFAULT_TURN_TIME_LIMIT);
-  if (!timeLimitResult.ok) {
-    sendError(socket, timeLimitResult.message, "time_limit_invalid");
-    return;
-  }
+  const action = message.action || "join";
+  if (!["create", "join", "resume"].includes(action)) return sendError(socket, "入室方法を選んでください。", "action_invalid");
+  if (session.room) return sendError(socket, "すでに入室しています。", "already_joined");
   let room = rooms.get(roomKey);
 
-  if (room && !room.players.some((candidate) => candidate.connected)) {
+  if (room && action !== "resume" && !room.players.some((candidate) => candidate.connected)) {
     deleteRoom(room);
     room = null;
   }
 
-  if (room && room.status === "waiting" && room.players.length === 1 && !room.players[0].connected) {
+  if (room && action !== "resume" && room.status === "waiting" && room.players.length === 1 && !room.players[0].connected) {
     deleteRoom(room);
     room = null;
   }
 
-  if (!room) {
+  if (action === "create") {
+    if (room) return sendError(socket, "このキーワードの部屋はすでにあります。", "room_exists");
+    const timeLimitResult = validateTimeLimit(message.timeLimitSeconds ?? DEFAULT_TURN_TIME_LIMIT);
+    if (!timeLimitResult.ok) return sendError(socket, timeLimitResult.message, "time_limit_invalid");
+    const length = Number(message.length ?? DEFAULT_LENGTH);
+    if (gameType === "hitblow" && ![3, 4].includes(length)) return sendError(socket, "3桁か4桁を選んでください。", "length_invalid");
     room = makeRoom(roomKey, keywordHash, gameType, timeLimitResult.value);
+    room.length = gameType === "hitblow" ? length : DEFAULT_LENGTH;
     rooms.set(roomKey, room);
   }
 
+  if (!room) return sendError(socket, "部屋が見つかりません。", "room_missing");
+  if (action === "resume" && !room.players.some((candidate) => candidate.id === playerId)) {
+    return sendError(socket, "元の部屋に戻れませんでした。", "room_missing");
+  }
+  expireSetupIfNeeded(room);
+
   let player = room.players.find((candidate) => candidate.id === playerId);
   if (!player) {
-    if (room.players.length >= 2) {
+    if (room.players.length >= 2 || room.status !== "waiting") {
       sendError(socket, "このキーワードはすでに対戦中です。", "room_full");
       return;
     }
@@ -446,7 +504,7 @@ function handleJoin(socket, session, message) {
   attachPlayerSocket(room, player, socket, session);
 
   if (room.players.length === 2 && room.status === "waiting") {
-    room.status = "setup";
+    startSetup(room);
   }
 
   broadcastRoom(room);
@@ -469,10 +527,12 @@ function handleSetSecret(socket, session, message) {
     sendError(socket, "この部屋では数字設定は使いません。", "wrong_game");
     return;
   }
+  expireSetupIfNeeded(room);
   if (room.status !== "setup") {
     sendError(socket, "今は答えを設定できません。", "wrong_phase");
     return;
   }
+  if (player.secret) return sendError(socket, "数字は決定済みです。", "already_ready");
 
   const secretResult = validateNumber(message.value, room.length);
   if (!secretResult.ok) {
@@ -484,6 +544,8 @@ function handleSetSecret(socket, session, message) {
   player.rematch = false;
 
   if (room.players.length === 2 && room.players.every((candidate) => candidate.secret)) {
+    clearSetupTimer(room);
+    room.setupDeadlineAt = null;
     room.status = "playing";
     startTurn(room, room.startingIndex);
   }
@@ -651,12 +713,13 @@ function handleGuess(socket, session, message) {
     createdAt: Date.now()
   });
 
-  if (result.hits === room.length) {
-    room.status = "ended";
-    room.winnerId = player.id;
-    room.turnStartedAt = null;
-    room.turnDeadlineAt = null;
-    clearTurnTimer(room);
+  if (room.pendingWinnerId) {
+    finishGame(room, result.hits === room.length ? null : room.pendingWinnerId, "final-answer");
+  } else if (result.hits === room.length && room.turnIndex === room.startingIndex) {
+    room.pendingWinnerId = player.id;
+    advanceTurn(room);
+  } else if (result.hits === room.length) {
+    finishGame(room, player.id, "correct-answer");
   } else {
     advanceTurn(room);
   }
@@ -673,6 +736,7 @@ function handleRematch(socket, session) {
     sendError(socket, "まだ再戦できません。", "wrong_phase");
     return;
   }
+  if (room.players.length !== 2 || !getOpponent(room, player)) return sendError(socket, "相手がメインに戻りました。", "opponent_left");
 
   player.rematch = true;
   if (room.players.length === 2 && room.players.every((candidate) => candidate.rematch)) {
@@ -680,6 +744,9 @@ function handleRematch(socket, session) {
     room.guesses = [];
     room.ghost = makeGhostState();
     room.winnerId = null;
+    room.result = null;
+    room.endReason = null;
+    room.pendingWinnerId = null;
     room.turnStartedAt = null;
     room.turnDeadlineAt = null;
     clearTurnTimer(room);
@@ -690,6 +757,7 @@ function handleRematch(socket, session) {
       candidate.ghostSetup = null;
       candidate.rematch = false;
     }
+    startSetup(room);
   }
 
   broadcastRoom(room);
@@ -702,7 +770,12 @@ function removePlayerFromRoom(room, player) {
   }
   if (room.players.length === 0) {
     deleteRoom(room);
-  } else if (room.status !== "playing") {
+  } else if (room.status === "ended") {
+    broadcastRoom(room);
+  } else if (room.status === "playing") {
+    finishGame(room, room.players[0].id, "opponent-left");
+    broadcastRoom(room);
+  } else {
     room.status = "waiting";
     room.guesses = [];
     room.ghost = makeGhostState();
@@ -710,11 +783,13 @@ function removePlayerFromRoom(room, player) {
     room.turnStartedAt = null;
     room.turnDeadlineAt = null;
     clearTurnTimer(room);
+    clearSetupTimer(room);
+    room.setupDeadlineAt = null;
+    room.startingIndex = 0;
+    room.turnIndex = 0;
     room.players[0].secret = null;
     room.players[0].ghostSetup = null;
     room.players[0].rematch = false;
-    broadcastRoom(room);
-  } else {
     broadcastRoom(room);
   }
 }
@@ -853,5 +928,5 @@ setInterval(() => {
 }, 60000);
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Hit and Blow server running at http://localhost:${PORT}`);
+  console.log(`Hit and Blow server running at http://localhost:${server.address().port}`);
 });

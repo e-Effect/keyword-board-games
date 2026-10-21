@@ -1,5 +1,5 @@
 const DEFAULT_LENGTH = 3;
-const TURN_TIME_LIMITS = [15, 30, 45, 60];
+const TURN_TIME_LIMITS = [15, 30, 45, 60, 0];
 const DEFAULT_TURN_TIME_LIMIT = 30;
 
 function normalizeKeyword(input) {
@@ -29,11 +29,14 @@ function validateNumber(value, length = DEFAULT_LENGTH) {
 }
 
 function validateTimeLimit(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return { ok: false, message: "制限時間を選んでください。" };
+  }
   const limit = Number(value);
   if (!TURN_TIME_LIMITS.includes(limit)) {
     return {
       ok: false,
-      message: `制限時間は${TURN_TIME_LIMITS.join("秒、")}秒から選んでください。`
+      message: "制限時間は15秒・30秒・45秒・60秒・無制限から選んでください。"
     };
   }
   return { ok: true, value: limit };

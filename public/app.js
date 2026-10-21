@@ -13,6 +13,7 @@ let joinDraft = {
   nickname: localStorage.getItem(NICKNAME_KEY) || "",
   keyword: "",
   timeLimitSeconds: Number(localStorage.getItem(TIME_LIMIT_KEY) || 30),
+  length: 3,
   gameType: localStorage.getItem(GAME_TYPE_KEY) || "hitblow"
 };
 let secretDigits = [];
@@ -22,7 +23,12 @@ let selectedGhostPieceId = null;
 let ghostSetupDrag = null;
 let lastToastTimer = null;
 let reconnectTimer = null;
-let installPromptEvent = null;
+let joinMode = null;
+let joining = false;
+
+function timeLabel(seconds) {
+  return seconds === 0 ? "無制限" : `${seconds}秒`;
+}
 
 function makePlayerId() {
   const existing = localStorage.getItem(PLAYER_ID_KEY);
@@ -89,7 +95,7 @@ function renderPhaseSteps() {
 
 function renderMatchStats() {
   const playerCount = state.opponent ? 2 : 1;
-  const readyCount = state.status === "setup" ? countReadyPlayers() : state.status === "waiting" ? 0 : 2;
+  const readyCount = countReadyPlayers();
   return `
     <div class="stat-line">
       <span><b>人数</b>${playerCount}/2</span>
@@ -100,12 +106,13 @@ function renderMatchStats() {
 }
 
 function getRemainingSeconds() {
-  if (!state || state.status !== "playing" || !state.turnDeadlineAt || !state.serverNow) {
+  const deadline = state && (state.status === "setup" ? state.setupDeadlineAt : state.turnDeadlineAt);
+  if (!state || !deadline || !state.serverNow) {
     return null;
   }
   const elapsed = Date.now() - (state.receivedAt || Date.now());
   const estimatedServerNow = state.serverNow + elapsed;
-  return Math.max(0, Math.ceil((state.turnDeadlineAt - estimatedServerNow) / 1000));
+  return Math.max(0, Math.ceil((deadline - estimatedServerNow) / 1000));
 }
 
 function updateCountdown() {
@@ -116,7 +123,10 @@ function updateCountdown() {
   const remaining = getRemainingSeconds();
   timers.forEach((timer) => {
     const value = remaining === null ? state.rules.timeLimitSeconds : remaining;
-    timer.textContent = timer.dataset.timerFormat === "short" ? String(value) : `${value}秒`;
+    timer.textContent = remaining === null && value === 0
+      ? timer.dataset.timerFormat === "short" ? "∞" : "無制限"
+      : timer.dataset.timerFormat === "short" ? String(value) : `${value}秒`;
+    timer.classList.toggle("unlimited", remaining === null && value === 0);
     timer.classList.toggle("low", remaining !== null && remaining <= 5);
   });
 }
@@ -162,29 +172,6 @@ function setConnection(status) {
   }
 }
 
-function renderInstallAction() {
-  if (!installPromptEvent) {
-    return "";
-  }
-  return `<button id="installApp" class="button secondary" type="button">ホーム画面に追加</button>`;
-}
-
-function bindInstallAction() {
-  const installButton = document.querySelector("#installApp");
-  if (!installButton) {
-    return;
-  }
-  installButton.addEventListener("click", async () => {
-    if (!installPromptEvent) {
-      return;
-    }
-    installPromptEvent.prompt();
-    await installPromptEvent.userChoice;
-    installPromptEvent = null;
-    render();
-  });
-}
-
 function send(payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     showToast("サーバーに接続していません。");
@@ -209,6 +196,12 @@ function connect() {
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.type === "state") {
+      joining = false;
+      if (message.status === "setup" && (!state || state.status !== "setup")) {
+        secretDigits = [];
+        guessDigits = [];
+        ghostSetupKinds = [...DEFAULT_GHOST_SETUP];
+      }
       if (message.gameType !== "ghost" || message.status !== "playing" || !message.isMyTurn) {
         selectedGhostPieceId = null;
       }
@@ -219,11 +212,20 @@ function connect() {
       return;
     }
     if (message.type === "error") {
+      joining = false;
+      if (message.code === "room_missing" && state) {
+        state = null;
+        joinMode = null;
+      }
+      if (!state) render();
       showToast(message.message);
       return;
     }
     if (message.type === "left") {
       state = null;
+      joinMode = null;
+      joining = false;
+      joinDraft.keyword = "";
       secretDigits = [];
       guessDigits = [];
       ghostSetupKinds = [...DEFAULT_GHOST_SETUP];
@@ -247,6 +249,8 @@ function sendJoin() {
     type: "join",
     playerId,
     nickname: joinDraft.nickname,
+    action: state ? "resume" : joinMode,
+    length: joinDraft.length,
     keyword: joinDraft.keyword,
     timeLimitSeconds: joinDraft.timeLimitSeconds,
     gameType: joinDraft.gameType
@@ -277,10 +281,10 @@ function renderTimeOptions() {
     <fieldset class="time-field">
       <legend>制限時間</legend>
       <div class="time-options">
-        ${[15, 30, 45, 60].map((seconds) => `
+        ${[15, 30, 45, 60, 0].map((seconds) => `
           <label class="time-option ${joinDraft.timeLimitSeconds === seconds ? "selected" : ""}">
             <input type="radio" name="timeLimitSeconds" value="${seconds}" ${joinDraft.timeLimitSeconds === seconds ? "checked" : ""}>
-            <span>${seconds}秒</span>
+            <span>${timeLabel(seconds)}</span>
           </label>
         `).join("")}
       </div>
@@ -290,11 +294,23 @@ function renderTimeOptions() {
 
 function renderJoin() {
   setScreenMode("menu");
+  if (!joinMode) {
+    app.innerHTML = `
+      <section class="panel stack">
+        <h2>オンライン対戦</h2>
+        <div class="room-choices">
+          <button id="createRoom" class="button" type="button">部屋を作る</button>
+          <button id="joinRoom" class="button secondary" type="button">入室する</button>
+        </div>
+      </section>`;
+    document.querySelector("#createRoom").addEventListener("click", () => { joinMode = "create"; render(); });
+    document.querySelector("#joinRoom").addEventListener("click", () => { joinMode = "join"; render(); });
+    return;
+  }
   app.innerHTML = `
     <section class="panel stack">
       <div>
-        <h2>マッチング</h2>
-        <p class="muted">同じキーワードの2人で対戦します。</p>
+        <h2>${joinMode === "create" ? "部屋を作る" : "入室する"}</h2>
       </div>
       ${renderPhaseSteps()}
       <form id="joinForm" class="stack">
@@ -307,20 +323,34 @@ function renderJoin() {
           <input id="keyword" name="keyword" minlength="4" maxlength="40" autocomplete="off" value="${escapeHtml(joinDraft.keyword)}" placeholder="4文字以上">
         </label>
         ${renderGameOptions()}
-        ${renderTimeOptions()}
-        <button class="button" type="submit">入室</button>
+        ${joinMode === "create" && joinDraft.gameType === "hitblow" ? `
+          <fieldset class="time-field">
+            <legend>桁数</legend>
+            <div class="game-options">
+              ${[3, 4].map((length) => `<label class="game-option ${joinDraft.length === length ? "selected" : ""}">
+                <input type="radio" name="length" value="${length}" ${joinDraft.length === length ? "checked" : ""}>
+                <span>${length}桁</span></label>`).join("")}
+            </div>
+          </fieldset>` : ""}
+        ${joinMode === "create" ? renderTimeOptions() : ""}
+        <button class="button" type="submit" ${joining ? "disabled" : ""}>${joining ? "接続中…" : joinMode === "create" ? "部屋を作る" : "入室する"}</button>
+        <button id="backMain" class="button secondary" type="button">メインに戻る</button>
       </form>
-      ${renderInstallAction()}
     </section>
   `;
 
-  bindInstallAction();
+  document.querySelector("#backMain").addEventListener("click", () => { joinMode = null; render(); });
+  for (const name of ["nickname", "keyword"]) {
+    document.querySelector(`#${name}`).addEventListener("input", (event) => { joinDraft[name] = event.target.value; });
+  }
   document.querySelectorAll('input[name="gameType"]').forEach((input) => {
     input.addEventListener("change", () => {
       joinDraft.gameType = input.value;
-      document.querySelectorAll(".game-option").forEach((option) => option.classList.remove("selected"));
-      input.closest(".game-option").classList.add("selected");
+      render();
     });
+  });
+  document.querySelectorAll('input[name="length"]').forEach((input) => {
+    input.addEventListener("change", () => { joinDraft.length = Number(input.value); render(); });
   });
   document.querySelectorAll('input[name="timeLimitSeconds"]').forEach((input) => {
     input.addEventListener("change", () => {
@@ -334,7 +364,10 @@ function renderJoin() {
     const form = new FormData(event.currentTarget);
     joinDraft.nickname = String(form.get("nickname") || "").trim();
     joinDraft.keyword = String(form.get("keyword") || "").trim();
-    joinDraft.timeLimitSeconds = Number(form.get("timeLimitSeconds") || 30);
+    if (joinMode === "create") {
+      joinDraft.timeLimitSeconds = Number(form.get("timeLimitSeconds") ?? 30);
+      joinDraft.length = Number(form.get("length") ?? 3);
+    }
     joinDraft.gameType = String(form.get("gameType") || "hitblow");
     if ([...joinDraft.keyword.normalize("NFKC")].length < 4) {
       showToast("キーワードは4文字以上にしてください。");
@@ -344,6 +377,8 @@ function renderJoin() {
     localStorage.setItem(TIME_LIMIT_KEY, String(joinDraft.timeLimitSeconds));
     localStorage.setItem(GAME_TYPE_KEY, joinDraft.gameType);
     sendJoin();
+    joining = Boolean(socket && socket.readyState === WebSocket.OPEN);
+    render();
   });
 }
 
@@ -457,8 +492,8 @@ function renderDuelHeader() {
     <div class="duel-top-space"></div>
     <section class="duel-header">
       <div class="turn-tabs">
-        <span>先攻</span>
-        <span>後攻</span>
+        <span>${state.isFirst ? "先攻" : "後攻"}</span>
+        <span>${state.isFirst ? "後攻" : "先攻"}</span>
       </div>
       ${renderDuelSide("me")}
       ${renderDuelSide("opponent")}
@@ -491,24 +526,23 @@ function renderDeckKeypad(mode, digits) {
         const used = digits.includes(String(value));
         return `<button class="deck-key ${used ? "used" : ""}" type="button" data-${mode}-digit="${value}" ${used ? "disabled" : ""}>${value}</button>`;
       }).join("")}
-      <button id="${mode === "secret" ? "submitSecret" : "submitGuess"}" class="deck-key submit" type="button" ${digits.length === state.rules.length ? "" : "disabled"}>✓</button>
-      <div></div>
-      <div></div>
-      <div></div>
-      <button class="deck-key clear" type="button" data-${mode}-back>×</button>
+      <button id="${mode === "secret" ? "submitSecret" : "submitGuess"}" class="deck-key submit" type="button" ${digits.length === state.rules.length ? "" : "disabled"}>決定</button>
+      <button class="deck-key clear" type="button" data-${mode}-back aria-label="1桁消す">⌫</button>
       <button class="sr-only" type="button" data-${mode}-clear>クリア</button>
     </div>
   `;
 }
 
 function renderInputDeck({ mode, digits, prompt, active = true }) {
-  const timerText = state.status === "playing" ? (getRemainingSeconds() ?? state.rules.timeLimitSeconds) : state.rules.timeLimitSeconds;
+  const timerText = getRemainingSeconds() ?? (state.rules.timeLimitSeconds === 0 ? "∞" : state.rules.timeLimitSeconds);
   return `
     <section class="input-deck ${active ? "" : "inactive"}">
-      <div class="round-timer turn-timer" data-timer-format="short">${timerText}</div>
       <div class="deck-curve"></div>
       <div class="deck-inner">
-        <p>${prompt}</p>
+        <div class="deck-heading">
+          <div class="round-timer turn-timer" data-timer-format="short" aria-label="残り時間">${timerText}</div>
+          <p>${prompt}</p>
+        </div>
         ${renderInputDisplay(digits)}
         ${active ? renderDeckKeypad(mode, digits) : ""}
       </div>
@@ -743,7 +777,7 @@ function renderGhostSetup() {
           <p>Ghost Duel</p>
           <h2>配置を決める</h2>
         </div>
-        <span>${state.rules.timeLimitSeconds}秒</span>
+        <span>${timeLabel(state.rules.timeLimitSeconds)}</span>
       </header>
       ${renderMatchStats()}
       <div class="ghost-players">
@@ -814,7 +848,7 @@ function renderGhostGame() {
           <p>Ghost Duel</p>
           <h2>${title}</h2>
         </div>
-        ${ended ? `<span>${ghostWinText(state.ghost.winReason)}</span>` : `<span class="turn-timer">${state.rules.timeLimitSeconds}秒</span>`}
+        ${ended ? `<span>${ghostWinText(state.ghost.winReason)}</span>` : `<span class="turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>`}
       </header>
       ${renderGhostCounts()}
       ${renderGhostBoard()}
@@ -825,8 +859,8 @@ function renderGhostGame() {
       </div>
       ${ended ? `
         <div class="ghost-actions">
-          <button id="rematch" class="button" type="button">${state.me.rematch ? "再戦待ち" : "再戦"}</button>
-          <button id="leave" class="button secondary" type="button">別のキーワードへ</button>
+          <button id="rematch" class="button" type="button" ${state.me.rematch || !state.opponent ? "disabled" : ""}>${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
+          <button id="leave" class="button secondary" type="button">メインに戻る</button>
         </div>
       ` : ""}
     </section>
@@ -869,7 +903,7 @@ function renderWaiting() {
     <section class="panel stack">
       <div class="status-band attention">
         <strong>相手待ち</strong>
-        <span class="status-pill">${state.rules.timeLimitSeconds}秒</span>
+        <span class="status-pill">${timeLabel(state.rules.timeLimitSeconds)}${state.gameType === "hitblow" ? ` / ${state.rules.length}桁` : ""}</span>
       </div>
       ${renderPhaseSteps()}
       ${renderMatchStats()}
@@ -878,11 +912,9 @@ function renderWaiting() {
         <button id="copyLink" class="button" type="button">URLコピー</button>
         <button id="leave" class="button secondary" type="button">戻る</button>
       </div>
-      ${renderInstallAction()}
     </section>
   `;
   document.querySelector("#copyLink").addEventListener("click", copyCurrentUrl);
-  bindInstallAction();
   document.querySelector("#leave").addEventListener("click", () => send({ type: "leave" }));
 }
 
@@ -1000,7 +1032,7 @@ function renderHistoryTable(title, side) {
             return `<div class="duel-history-row empty"><span></span><b></b><b></b></div>`;
           }
           if (guess.skipped) {
-            return `<div class="duel-history-row skipped"><span>- - -</span><b></b><b></b></div>`;
+            return `<div class="duel-history-row skipped"><span>無回答</span><b></b><b></b></div>`;
           }
           return `
             <div class="duel-history-row">
@@ -1063,17 +1095,29 @@ function renderGuessPanel() {
   `;
 }
 
+function renderResult() {
+  const result = state.result === "draw" ? "draw" : state.winner && state.winner.side === "me" ? "win" : "lose";
+  const labels = { win: "WIN", lose: "Lose", draw: "Draw" };
+  const detail = state.endReason === "setup-timeout"
+    ? state.result === "double-loss" ? "両者とも数字設定が時間切れです" : "数字設定の時間切れで決着しました"
+    : state.result === "draw" ? "両者正解、引き分けです" : result === "win" ? "あなたの勝ちです" : "相手の勝ちです";
+  return `<section class="result-banner ${result}" aria-label="対戦結果">
+    <h2>${labels[result]}</h2><p>${detail}</p>
+  </section>`;
+}
+
 function renderGame() {
   setScreenMode("arena");
   app.innerHTML = `
     <section class="arena-screen play-screen">
       ${renderDuelHeader()}
-      <div class="arena-message ${state.status === "ended" ? "ended" : state.isMyTurn ? "active" : ""}">
-        <strong>${state.status === "ended"
-          ? state.winner.side === "me" ? "勝ち" : "負け"
-          : state.isMyTurn ? "あなたのターン" : "相手のターン"}</strong>
-        ${state.status === "ended" ? `<span>勝者: ${escapeHtml(state.winner.nickname)}</span>` : `<span class="timer-pill turn-timer">${state.rules.timeLimitSeconds}秒</span>`}
-      </div>
+      ${state.status === "ended" ? renderResult() : `
+        <div class="arena-message ${state.isMyTurn ? "active" : ""}">
+          <strong>${state.isMyTurn ? "あなたのターン" : "相手のターン"}</strong>
+          <span class="timer-pill turn-timer">${timeLabel(state.rules.timeLimitSeconds)}</span>
+        </div>
+        ${state.finalAnswer ? `<div class="final-answer">${state.isMyTurn ? "最後の回答です。正解すればDraw！" : "後攻の最後の回答を待っています"}</div>` : ""}
+      `}
       ${renderHistoryBoard()}
       ${state.status === "playing"
         ? renderInputDeck({
@@ -1085,8 +1129,8 @@ function renderGame() {
         : ""}
       ${state.status === "ended" ? `
         <section class="arena-actions">
-          <button id="rematch" class="button" type="button">${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
-          <button id="leave" class="button secondary" type="button">別のキーワードへ</button>
+          <button id="rematch" class="button" type="button" ${state.me.rematch || !state.opponent ? "disabled" : ""}>${state.me.rematch ? "再戦待ち" : "同じ相手と再戦"}</button>
+          <button id="leave" class="button secondary" type="button">メインに戻る</button>
         </section>
       ` : ""}
     </section>
@@ -1104,9 +1148,11 @@ function renderGame() {
     document.querySelector("#rematch").addEventListener("click", () => send({ type: "rematch" }));
     document.querySelector("#leave").addEventListener("click", () => send({ type: "leave" }));
   }
+  document.querySelectorAll(".duel-history-rows").forEach((rows) => { rows.scrollTop = rows.scrollHeight; });
 }
 
 function render() {
+  app.style.setProperty("--digits", state ? state.rules.length : joinDraft.length);
   if (!state) {
     renderJoin();
     return;
@@ -1137,16 +1183,6 @@ function render() {
 render();
 connect();
 setInterval(updateCountdown, 250);
-
-window.addEventListener("beforeinstallprompt", (event) => {
-  event.preventDefault();
-  installPromptEvent = event;
-  render();
-});
-
-window.addEventListener("appinstalled", () => {
-  installPromptEvent = null;
-});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

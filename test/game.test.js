@@ -22,12 +22,20 @@ test("validates three unique digits", () => {
   assert.equal(validateNumber("112").ok, false);
   assert.equal(validateNumber("12").ok, false);
   assert.equal(validateNumber("12a").ok, false);
+  assert.equal(validateNumber("0123", 4).ok, true);
+  assert.equal(validateNumber("012", 4).ok, false);
+  assert.equal(validateNumber("0112", 4).ok, false);
 });
 
 test("validates supported turn time limits", () => {
   assert.equal(validateTimeLimit(15).ok, true);
   assert.equal(validateTimeLimit("30").ok, true);
   assert.equal(validateTimeLimit(20).ok, false);
+  assert.equal(validateTimeLimit(0).ok, true);
+  assert.equal(validateTimeLimit("0").ok, true);
+  assert.equal(validateTimeLimit(null).ok, false);
+  assert.equal(validateTimeLimit("").ok, false);
+  assert.equal(validateTimeLimit(false).ok, false);
 });
 
 test("judges hit and blow counts", () => {

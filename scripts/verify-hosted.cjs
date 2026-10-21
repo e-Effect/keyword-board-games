@@ -7,12 +7,13 @@ if (!baseUrl) throw new Error("Usage: node scripts/verify-hosted.cjs https://exa
 const sockets = [];
 const keyword = `verify-${randomUUID()}`;
 
-async function connect(gameType, nickname) {
+async function connect(gameType, nickname, options = {}) {
   const socket = new WebSocket(baseUrl.replace(/^http/, "ws"));
   sockets.push(socket);
-  const client = { socket, state: null, failure: null };
+  const client = { socket, state: null, failure: null, messages: [], playerId: options.playerId || randomUUID(), keyword: options.keyword || keyword };
   socket.on("message", (raw) => {
     const message = JSON.parse(raw);
+    client.messages.push(message);
     if (message.type === "state") client.state = message;
     if (message.type === "error") client.failure = new Error(message.message);
   });
@@ -30,7 +31,7 @@ async function connect(gameType, nickname) {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  client.send({ type: "join", playerId: randomUUID(), keyword, nickname, gameType, timeLimitSeconds: 15 });
+  client.send({ type: "join", playerId: client.playerId, keyword, nickname, gameType, timeLimitSeconds: 15, ...options });
   await client.wait(() => true);
   return client;
 }
@@ -40,13 +41,16 @@ async function verify() {
   assert.equal(health.status, 200);
   assert.equal((await health.json()).ok, true);
   console.log("PASS HTTPS health");
+  await assert.rejects(connect("hitblow", "Missing", { keyword: `missing-${randomUUID()}`, action: "join" }), /部屋が見つかりません/);
 
-  const first = await connect("hitblow", "Verify A");
-  const ghostA = await connect("ghost", "Verify C");
+  const first = await connect("hitblow", "Verify A", { action: "create" });
+  await assert.rejects(connect("hitblow", "Duplicate", { action: "create" }), /すでにあります/);
+  const ghostA = await connect("ghost", "Verify C", { action: "create" });
   assert.equal(first.state.status, "waiting");
   assert.equal(ghostA.state.status, "waiting");
   const second = await connect("hitblow", "Verify B");
   await first.wait((state) => state.status === "setup");
+  assert.ok(Math.abs(first.state.setupDeadlineAt - first.state.serverNow - 30000) < 1000);
   assert.equal(ghostA.state.status, "waiting");
   console.log("PASS keyword matching and game-mode isolation");
 
@@ -90,6 +94,85 @@ async function verify() {
   assert.equal(mover.state.isMyTurn, false);
   assert.equal(mover.state.ghost.pieces.find((item) => item.id === piece.id).row, row);
   console.log("PASS Ghost Duel setup, hidden opponent colors, move, and turn switch");
+
+  async function pair(options = {}) {
+    const pairKeyword = `verify-${randomUUID()}`;
+    const a = await connect("hitblow", "Host", { ...options, keyword: pairKeyword, action: "create" });
+    const b = await connect("hitblow", "Guest", { keyword: pairKeyword, action: "join", length: 3, timeLimitSeconds: 60 });
+    await a.wait((state) => state.status === "setup");
+    return [a, b];
+  }
+  const [timeoutA, timeoutB] = await pair({ timeLimitSeconds: 0, length: 4 });
+  const setupDeadline = timeoutA.state.setupDeadlineAt;
+  timeoutA.send({ type: "set-secret", value: "0123" });
+  await timeoutA.wait((state) => state.me.ready);
+  timeoutB.socket.close();
+  await timeoutA.wait((state) => !state.opponent.connected);
+  const resumed = await connect("hitblow", "Guest", { action: "resume", keyword: timeoutB.keyword, playerId: timeoutB.playerId });
+  assert.equal(resumed.state.setupDeadlineAt, setupDeadline);
+  const [bothLate] = await pair({ timeLimitSeconds: 0 });
+  const [finalA, finalB] = await pair();
+  finalA.send({ type: "set-secret", value: "123" });
+  finalB.send({ type: "set-secret", value: "456" });
+  await finalA.wait((state) => state.status === "playing");
+  finalA.send({ type: "guess", value: "456" });
+  await finalA.wait((state) => state.finalAnswer);
+
+  const [a, b] = await pair({ length: 4, timeLimitSeconds: 0 });
+  assert.equal(b.state.rules.length, 4);
+  assert.equal(b.state.rules.timeLimitSeconds, 0);
+  a.send({ type: "set-secret", value: "0123" });
+  b.send({ type: "set-secret", value: "4567" });
+  await a.wait((state) => state.status === "playing");
+  await b.wait((state) => state.status === "playing");
+  assert.equal(a.state.turnDeadlineAt, null);
+  assert.equal(a.state.setupDeadlineAt, null);
+  assert.equal(a.state.isFirst, true);
+  a.send({ type: "guess", value: "4567" });
+  await a.wait((state) => state.finalAnswer);
+  await b.wait((state) => state.finalAnswer);
+  assert.equal(a.state.status, "playing");
+  assert.equal(b.state.isMyTurn, true);
+  b.send({ type: "guess", value: "0123" });
+  await a.wait((state) => state.status === "ended");
+  await b.wait((state) => state.status === "ended");
+  assert.equal(a.state.result, "draw");
+  assert.equal(b.state.winner, null);
+  console.log("PASS 4 digits, inherited settings, unlimited turns, final answer, and Draw");
+
+  a.send({ type: "rematch" });
+  b.send({ type: "rematch" });
+  await a.wait((state) => state.status === "setup");
+  await b.wait((state) => state.status === "setup");
+  assert.equal(a.state.isFirst, false);
+  assert.ok(a.state.setupDeadlineAt > setupDeadline);
+  a.send({ type: "set-secret", value: "0123" });
+  b.send({ type: "set-secret", value: "4567" });
+  await a.wait((state) => state.status === "playing");
+  await b.wait((state) => state.status === "playing");
+  b.send({ type: "guess", value: "0123" });
+  await a.wait((state) => state.finalAnswer);
+  a.send({ type: "guess", value: "4568" });
+  await a.wait((state) => state.status === "ended");
+  await b.wait((state) => state.status === "ended");
+  assert.equal(b.state.winner.side, "me");
+  a.send({ type: "leave" });
+  await b.wait((state) => !state.opponent);
+  assert.equal(b.state.status, "ended");
+  console.log("PASS rematch, swapped first player, final miss, and preserving result after opponent leaves");
+
+  await timeoutA.wait((state) => state.status === "ended", 35000);
+  assert.equal(timeoutA.state.winner.side, "me");
+  assert.equal(timeoutA.state.endReason, "setup-timeout");
+  await resumed.wait((state) => state.status === "ended");
+  assert.equal(resumed.state.winner.side, "opponent");
+  await bothLate.wait((state) => state.status === "ended");
+  assert.equal(bothLate.state.result, "double-loss");
+  await finalA.wait((state) => state.status === "ended");
+  assert.equal(finalA.state.winner.side, "me");
+  assert.equal(finalA.state.endReason, "final-answer-timeout");
+  console.log("PASS fixed 30-second setup loss even with unlimited turns");
+  console.log("PASS unchanged deadline after reconnect, double setup loss, and final-answer timeout");
 }
 
 verify().catch((error) => {
